@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>dev.agent-eyes.camsvc</string>
+	<key>CFBundleName</key>
+	<string>camsvc</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Agent Eyes captures frames when the assistant needs to look at your workbench.</string>
+	<key>NSCameraUseContinuityCameraDeviceType</key>
+	<true/>
+</dict>
+</plist>

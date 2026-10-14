@@ -1,3 +1,6 @@
 .orchestra/
 spike/out/
 spike/camprobe
+captures/
+.venv/
+__pycache__/
