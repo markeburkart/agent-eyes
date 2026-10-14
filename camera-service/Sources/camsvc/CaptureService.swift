@@ -5,12 +5,14 @@ enum ServiceError: Error {
     case unknownCamera(String)
     case unavailable(String)
     case noFrames(String)
+    case notOpen(String)
     case encodeFailed
 
     var status: Int {
         switch self {
         case .badRequest: return 400
         case .unknownCamera: return 404
+        case .notOpen: return 409
         case .unavailable: return 503
         case .noFrames: return 504
         case .encodeFailed: return 500
@@ -23,6 +25,7 @@ enum ServiceError: Error {
         case .unknownCamera: return "unknown_camera"
         case .unavailable: return "camera_unavailable"
         case .noFrames: return "no_frames"
+        case .notOpen: return "not_open"
         case .encodeFailed: return "encode_failed"
         }
     }
@@ -33,6 +36,7 @@ enum ServiceError: Error {
         case .unknownCamera(let r): return "No camera matches '\(r)'. It may be disconnected."
         case .unavailable(let n): return "Camera '\(n)' could not be opened."
         case .noFrames(let n): return "Camera '\(n)' delivered no fresh frames."
+        case .notOpen(let r): return "Camera '\(r)' has no open stream with frames."
         case .encodeFailed: return "Failed to encode image."
         }
     }
@@ -165,8 +169,20 @@ final class CaptureService {
             "sharpness": sharpness,
             "candidate_sharpness": scored.map(\.1),
             "frame_age_ms": Int(Date().timeIntervalSince(best.capturedAt) * 1000),
-            "captured_at": ISO8601DateFormatter().string(from: best.capturedAt),
+            "captured_at": isoMillis(best.capturedAt),
         ]
+    }
+
+    /// The newest buffered frame of an already-open stream as a small JPEG, however old it is.
+    /// Never opens or recovers a stream, so watching the preview doesn't change what's being tested.
+    func preview(_ ref: String, maxEdge: Int) throws -> (jpeg: Data, ageMs: Int, width: Int, height: Int) {
+        // Look up by ID first so a stream whose device has vanished from discovery can still be shown.
+        let id = lock.withLock { streams[ref] } != nil ? ref : registry.resolve(ref)?.uniqueID
+        guard let id, let frame = lock.withLock({ streams[id] })?.latestFrame else { throw ServiceError.notOpen(ref) }
+        let width = CVPixelBufferGetWidth(frame.pixelBuffer), height = CVPixelBufferGetHeight(frame.pixelBuffer)
+        guard let jpeg = encodeJPEG(frame.pixelBuffer, crop: PixelRect(x: 0, y: 0, width: width, height: height),
+                                    maxEdge: maxEdge, quality: 0.7) else { throw ServiceError.encodeFailed }
+        return (jpeg.data, Int(Date().timeIntervalSince(frame.capturedAt) * 1000), width, height)
     }
 
     private func stream(for device: AVCaptureDevice) throws -> CameraStream {

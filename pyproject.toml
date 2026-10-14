@@ -10,6 +10,9 @@ dependencies = [
     "httpx>=0.28.1",
 ]
 
+[project.scripts]
+agent-eyes = "agent_eyes.cli:main"
+
 [build-system]
 requires = ["uv_build>=0.11.21,<0.12.0"]
 build-backend = "uv_build"
