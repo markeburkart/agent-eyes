@@ -4,23 +4,39 @@ import Network
 struct HTTPRequest {
     let method: String
     let path: String
+    let query: [String: String]
     let body: Data
 }
 
 struct HTTPResponse {
     var status: Int
-    var json: Any
+    var contentType: String
+    var body: Data
+    var headers: [String: String] = [:]
+
+    init(status: Int, json: Any) {
+        self.status = status
+        self.contentType = "application/json"
+        self.body = (try? JSONSerialization.data(withJSONObject: json)) ?? Data("{}".utf8)
+    }
+
+    init(status: Int, contentType: String, body: Data, headers: [String: String] = [:]) {
+        self.status = status
+        self.contentType = contentType
+        self.body = body
+        self.headers = headers
+    }
 
     func serialized() -> Data {
-        let body = (try? JSONSerialization.data(withJSONObject: json)) ?? Data("{}".utf8)
-        let reason = [200: "OK", 400: "Bad Request", 404: "Not Found", 500: "Internal Server Error", 503: "Service Unavailable", 504: "Gateway Timeout"][status] ?? "Error"
+        let reason = [200: "OK", 400: "Bad Request", 404: "Not Found", 409: "Conflict", 500: "Internal Server Error", 503: "Service Unavailable", 504: "Gateway Timeout"][status] ?? "Error"
         var head = "HTTP/1.1 \(status) \(reason)\r\n"
-        head += "Content-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
-        return Data(head.utf8) + body
+        head += "Content-Type: \(contentType)\r\nContent-Length: \(body.count)\r\nCache-Control: no-store\r\nConnection: close\r\n"
+        for (k, v) in headers { head += "\(k): \(v)\r\n" }
+        return Data((head + "\r\n").utf8) + body
     }
 }
 
-/// Minimal HTTP/1.1 server on loopback: one request per connection, JSON in and out.
+/// Minimal HTTP/1.1 server on loopback: one request per connection, JSON in (JSON or JPEG out).
 final class HTTPServer {
     private let listener: NWListener
     private let handler: (HTTPRequest) -> HTTPResponse
@@ -83,6 +99,8 @@ final class HTTPServer {
         }.first ?? 0
         let body = buf[headerEnd.upperBound...]
         guard body.count >= length else { return nil }
-        return HTTPRequest(method: String(parts[0]), path: String(parts[1]), body: Data(body.prefix(length)))
+        let target = URLComponents(string: String(parts[1]))
+        let query = Dictionary((target?.queryItems ?? []).map { ($0.name, $0.value ?? "") }, uniquingKeysWith: { _, last in last })
+        return HTTPRequest(method: String(parts[0]), path: target?.path ?? String(parts[1]), query: query, body: Data(body.prefix(length)))
     }
 }
