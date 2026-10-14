@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Agent Eyes · cameras</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --panel: #fff; --ink: #1d1d1b; --muted: #6b6b66; --line: #e2e1dc;
+    --ok: #1f7a3d; --ok-bg: #e3f3e7; --warn: #8a5a00; --warn-bg: #fbefd5; --bad: #b3261e; --bad-bg: #fbe3e1;
+    --accent: #2457c5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615; --panel: #1f1f1d; --ink: #ecebe6; --muted: #9a9993; --line: #33322f;
+      --ok: #6fd08f; --ok-bg: #173322; --warn: #f0c060; --warn-bg: #3a2e12; --bad: #ff8a80; --bad-bg: #3d1b19;
+      --accent: #7aa2ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.4 -apple-system, system-ui, sans-serif; background: var(--bg); color: var(--ink); }
+  header { display: flex; gap: 16px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+  header h1 { font-size: 15px; margin: 0; }
+  header label { color: var(--muted); }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 440px; gap: 16px; padding: 16px; align-items: start; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  .panel > h2 { font-size: 13px; margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 8px; }
+  .panel > h2 .spacer { flex: 1; }
+  #cams { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 16px; }
+  #cams:empty::before { content: "No cameras listed by the helper yet."; color: var(--muted); }
+  .cam { padding-bottom: 10px; }
+  .cam.missing { opacity: .75; border-style: dashed; }
+  .cam .head { padding: 8px 12px; }
+  .cam .title { font-weight: 600; font-size: 14px; }
+  .cam .id { color: var(--muted); font: 11px ui-monospace, monospace; word-break: break-all; }
+  .badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .badge { padding: 1px 7px; border-radius: 10px; font-size: 11px; background: var(--bg); color: var(--muted); border: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+  .badge.ok { background: var(--ok-bg); color: var(--ok); border-color: transparent; }
+  .badge.warn { background: var(--warn-bg); color: var(--warn); border-color: transparent; }
+  .badge.bad { background: var(--bad-bg); color: var(--bad); border-color: transparent; }
+  .view { position: relative; margin: 0 12px; background: #000; aspect-ratio: 16 / 9; border-radius: 4px; overflow: hidden; cursor: crosshair; user-select: none; touch-action: none; }
+  .view img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+  .view img:not([src]) { visibility: hidden; }
+  .view.dead img { opacity: .3; filter: grayscale(1); }
+  .view .frame { position: absolute; pointer-events: none; }
+  .view .overlay { position: absolute; left: 6px; top: 6px; padding: 2px 6px; border-radius: 3px; background: rgba(0,0,0,.6); color: #fff; font: 11px ui-monospace, monospace; pointer-events: none; }
+  .view .alert { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); padding: 6px 12px; border-radius: 4px; background: rgba(179,38,30,.9); color: #fff; font-weight: 600; pointer-events: none; white-space: nowrap; }
+  .view .alert:empty { display: none; }
+  .view .region { position: absolute; border: 2px solid #ffd60a; box-shadow: 0 0 0 9999px rgba(0,0,0,.35); pointer-events: none; }
+  .controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 12px 0; }
+  .controls input { width: 64px; }
+  .controls .hint { color: var(--muted); font-size: 11px; width: 100%; }
+  button { font: inherit; padding: 3px 10px; border-radius: 5px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: progress; }
+  input, select { font: inherit; padding: 2px 4px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--ink); }
+  #side { display: flex; flex-direction: column; gap: 16px; position: sticky; top: 60px; max-height: calc(100vh - 76px); }
+  #results { overflow: auto; max-height: 55vh; }
+  #results:empty::after { content: "Captures appear here."; display: block; padding: 12px; color: var(--muted); }
+  .result { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  .result .rh { display: flex; justify-content: space-between; color: var(--muted); margin-bottom: 6px; }
+  .result .rh b { color: var(--ink); }
+  .result .imgbox { max-height: 300px; overflow: auto; background: #000; border-radius: 4px; }
+  .result .imgbox img { display: block; width: 100%; cursor: zoom-in; }
+  .result .imgbox.zoom img { width: auto; max-width: none; cursor: zoom-out; }
+  .result.error { color: var(--bad); }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 8px 0; font-variant-numeric: tabular-nums; }
+  dt { color: var(--muted); }
+  dd { margin: 0; }
+  .cands { display: grid; grid-template-columns: max-content 1fr max-content; gap: 2px 6px; align-items: center; font: 11px ui-monospace, monospace; }
+  .cands .bar { height: 8px; border-radius: 2px; background: var(--line); }
+  .cands .bar.best { background: var(--accent); }
+  #log { overflow: auto; flex: 1; min-height: 160px; font: 11px/1.5 ui-monospace, monospace; }
+  #log div { padding: 1px 12px; display: grid; grid-template-columns: 88px 44px 1fr; gap: 6px; border-bottom: 1px solid var(--line); }
+  #log .t, #log .s { color: var(--muted); }
+  #log .bad { background: var(--bad-bg); color: var(--bad); }
+  #log .good { background: var(--ok-bg); color: var(--ok); }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } #side { position: static; max-height: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Agent Eyes · cameras</h1>
+  <span id="helper" class="badge">helper …</span>
+  <label><input type="checkbox" id="previewOn" checked> live preview</label>
+  <label>rate <select id="rate"><option value="500">2 fps</option><option value="200" selected>5 fps</option><option value="100">10 fps</option></select></label>
+  <label>size <select id="edge"><option>480</option><option selected>640</option><option>960</option></select></label>
+</header>
+<main>
+  <section id="cams"></section>
+  <aside id="side">
+    <div class="panel"><h2>Captures<span class="spacer"></span><button id="clearResults">Clear</button></h2><div id="results"></div></div>
+    <div class="panel" style="display:flex;flex-direction:column;min-height:0;flex:1">
+      <h2>Events<span class="spacer"></span><button id="copyLog">Copy</button><button id="clearLog">Clear</button></h2>
+      <div id="log"></div>
+    </div>
+  </aside>
+</main>
+<template id="camTpl">
+  <div class="cam panel">
+    <div class="head">
+      <div class="title"></div>
+      <div class="id"></div>
+      <div class="badges"></div>
+    </div>
+    <div class="view"><img alt=""><div class="region" hidden></div><div class="overlay">no preview</div><div class="alert"></div></div>
+    <div class="controls">
+      <button data-act="open">Open</button>
+      <button data-act="overview" class="primary">Overview</button>
+      <button data-act="inspect" class="primary">Inspect</button>
+    </div>
+    <div class="controls">
+      region x <input data-k="x" type="number" min="0" max="1" step="0.01">
+      y <input data-k="y" type="number" min="0" max="1" step="0.01">
+      w <input data-k="w" type="number" min="0" max="1" step="0.01">
+      h <input data-k="h" type="number" min="0" max="1" step="0.01">
+      <button data-act="clear">×</button>
+      <div class="hint">Drag on the preview to draw a region (normalized, top-left origin). Empty = full frame; applies to both captures.</div>
+    </div>
+  </div>
+</template>
+<script>
+"use strict";
+// Must match the helper's CaptureService.maxFrameAge: older frames are never returned by /capture.
+const STALE_MS = 1500;
+const $ = (s, el = document) => el.querySelector(s);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const fmtTime = t => new Date(t).toLocaleTimeString([], { hour12: false }) + "." + String(new Date(t).getMilliseconds()).padStart(3, "0");
+const fmtSecs = ms => (ms / 1000).toFixed(1) + " s";
+const cams = new Map();  // id -> camera state
+
+// ---- events ---------------------------------------------------------------
+
+const logEl = $("#log");
+function classify(msg) {
+  if (/interruption ended|reopened|resumed|reachable again/i.test(msg)) return "good";
+  if (/disconnect|interrupt|stall|fail|error|no fresh|could not|unreachable|stopped|missing|not listed/i.test(msg)) return "bad";
+  if (/connected|stream started|appeared/i.test(msg)) return "good";
+  return "";
+}
+function addEvent(t, source, msg) {
+  const row = document.createElement("div");
+  row.className = classify(msg);
+  row.dataset.t = t;
+  row.innerHTML = `<span class="t"></span><span class="s"></span><span class="m"></span>`;
+  row.children[0].textContent = fmtTime(t);
+  row.children[1].textContent = source;
+  row.children[2].textContent = msg;
+  // Newest first; helper events arrive with a poll delay, so insert by timestamp.
+  let before = logEl.firstChild;
+  while (before && Number(before.dataset.t) > t) before = before.nextSibling;
+  logEl.insertBefore(row, before);
+  while (logEl.children.length > 1000) logEl.lastChild.remove();
+}
+const uiEvent = msg => addEvent(Date.now(), "ui", msg);
+
+let lastSeq = 0;
+async function pollEvents() {
+  for (;;) {
+    try {
+      const r = await fetch(`/api/events?after=${lastSeq}`);
+      if (r.ok) {
+        const d = await r.json();
+        if (d.last_seq < lastSeq) { lastSeq = 0; uiEvent("helper restarted (event sequence reset)"); continue; }
+        for (const e of d.events) addEvent(Date.parse(e.time), "helper", e.message);
+        lastSeq = d.last_seq;
+      }
+    } catch {}
+    await sleep(700);
+  }
+}
+
+$("#clearLog").onclick = () => { logEl.textContent = ""; };
+$("#copyLog").onclick = () => navigator.clipboard.writeText(
+  [...logEl.children].reverse().map(r => [...r.children].map(c => c.textContent).join("  ")).join("\n"));
+
+// ---- status ---------------------------------------------------------------
+
+const helperEl = $("#helper");
+let helperUp = null;
+function setHelper(up, text) {
+  helperEl.className = "badge " + (up ? "ok" : "bad");
+  helperEl.textContent = text;
+  if (helperUp !== null && up !== helperUp) uiEvent(up ? "helper reachable again" : `helper unreachable: ${text}`);
+  helperUp = up;
+}
+
+async function pollStatus() {
+  for (;;) {
+    try {
+      const r = await fetch("/api/cameras");
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.message || r.status);
+      setHelper(true, "helper ok");
+      const seen = new Set();
+      for (const info of d.cameras) { seen.add(info.id); update(cam(info), info); }
+      for (const c of cams.values()) if (!seen.has(c.id)) update(c, null);
+    } catch (e) {
+      setHelper(false, String(e.message || e));
+    }
+    await sleep(500);
+  }
+}
+
+function cam(info) {
+  let c = cams.get(info.id);
+  if (c) return c;
+  const el = $("#camTpl").content.firstElementChild.cloneNode(true);
+  c = { id: info.id, el, info: null, region: null, staleSince: null, frameAge: null };
+  cams.set(info.id, c);
+  $("#cams").append(el);
+  $(".id", el).textContent = info.id;
+  setupRegion(c);
+  el.querySelector("[data-act=open]").onclick = () => openCam(c);
+  el.querySelector("[data-act=overview]").onclick = e => capture(c, "overview", e.target);
+  el.querySelector("[data-act=inspect]").onclick = e => capture(c, "inspect", e.target);
+  el.querySelector("[data-act=clear]").onclick = () => setRegion(c, null);
+  uiEvent(`camera appeared: ${info.name} (${info.role || info.kind})`);
+  previewLoop(c);
+  return c;
+}
+
+function badge(text, cls = "") { const b = document.createElement("span"); b.className = "badge " + cls; b.textContent = text; return b; }
+
+// Applies a /cameras entry (or null when the camera is no longer listed) and logs transitions.
+function update(c, info) {
+  const prev = c.info;
+  const name = (info || prev).name;
+  if (!info) {
+    if (prev && !prev.missing) uiEvent(`${name}: not listed by helper any more`);
+    info = { ...prev, missing: true, connected: false, streaming: false, last_frame_age_ms: undefined };
+  } else if (prev?.missing) {
+    uiEvent(`${name}: listed again`);
+  }
+  if (prev && !info.missing) {
+    for (const k of ["connected", "streaming", "suspended"])
+      if (prev[k] !== info[k]) uiEvent(`${name}: ${k} ${prev[k]} → ${info[k]}`);
+  }
+  // A camera is stale when it has delivered frames before and should be streaming (or was) but has
+  // no recent frame. Before its first frame a newly opened stream is just warming up.
+  const age = info.last_frame_age_ms;
+  if (age !== undefined) c.hadFrame = true;
+  const stale = c.hadFrame && (info.streaming || c.staleSince !== null || prev?.streaming) && !(age <= STALE_MS);
+  if (stale && c.staleSince === null) {
+    c.staleSince = Date.now() - (age ?? 0);
+    uiEvent(`${name}: frames stopped` + (age !== undefined ? ` (last frame ${age} ms ago)` : ""));
+  } else if (!stale && c.staleSince !== null) {
+    uiEvent(`${name}: frames resumed after ${fmtSecs(Date.now() - c.staleSince)} without fresh frames`);
+    c.staleSince = null;
+  }
+  c.info = info;
+  c.el.classList.toggle("missing", !!info.missing);
+  $(".title", c.el).textContent = info.name + (info.role ? ` · ${info.role}` : "");
+  const b = $(".badges", c.el);
+  b.replaceChildren(
+    badge(info.kind),
+    info.missing ? badge("not listed", "bad") : badge(info.connected ? "connected" : "disconnected", info.connected ? "ok" : "bad"),
+    badge(info.streaming ? "streaming" : "not streaming", info.streaming ? "ok" : ""),
+    badge(info.suspended ? "suspended" : "not suspended", info.suspended ? "bad" : ""),
+    badge(age === undefined ? "last frame —" : `last frame ${age} ms`, age === undefined ? "" : age <= 500 ? "ok" : age <= STALE_MS ? "warn" : "bad"),
+    badge(info.frame_width ? `${info.frame_width}×${info.frame_height}` : "size —"),
+  );
+  $(".alert", c.el).textContent = c.staleSince !== null ? `no fresh frames for ${fmtSecs(Date.now() - c.staleSince)}` : "";
+}
+
+// ---- preview --------------------------------------------------------------
+
+const previewOn = $("#previewOn"), rateSel = $("#rate"), edgeSel = $("#edge");
+
+async function previewLoop(c) {
+  const view = $(".view", c.el), img = $("img", view), overlay = $(".overlay", view);
+  let url = null;
+  for (;;) {
+    const t0 = performance.now();
+    if (previewOn.checked) {
+      try {
+        const r = await fetch(`/api/preview?camera=${encodeURIComponent(c.id)}&max_edge=${edgeSel.value}`);
+        if (r.ok) {
+          const blob = await r.blob();
+          if (url) URL.revokeObjectURL(url);
+          img.src = url = URL.createObjectURL(blob);
+          const age = Number(r.headers.get("X-Frame-Age-Ms"));
+          view.classList.remove("dead");
+          view.style.aspectRatio = (r.headers.get("X-Source-Size") || "16x9").replace("x", " / ");
+          overlay.textContent = `frame age ${age} ms · ${r.headers.get("X-Source-Size")}`;
+        } else {
+          const d = await r.json().catch(() => ({}));
+          view.classList.add("dead");
+          overlay.textContent = d.error === "not_open" ? "no open stream (last image shown greyed)" : `preview error: ${d.message || r.status}`;
+        }
+      } catch (e) {
+        view.classList.add("dead");
+        overlay.textContent = `preview error: ${e.message}`;
+      }
+    }
+    await sleep(Math.max(50, Number(rateSel.value) - (performance.now() - t0)));
+  }
+}
+
+// ---- region ---------------------------------------------------------------
+
+function setupRegion(c) {
+  const view = $(".view", c.el);
+  const inputs = [...c.el.querySelectorAll("input[data-k]")];
+  // Normalized position within the displayed image (object-fit: contain may letterbox it).
+  const norm = e => {
+    const img = $("img", view), r = view.getBoundingClientRect();
+    const ar = img.naturalWidth && img.naturalHeight ? img.naturalWidth / img.naturalHeight : r.width / r.height;
+    const w = Math.min(r.width, r.height * ar), h = w / ar;
+    const left = r.left + (r.width - w) / 2, top = r.top + (r.height - h) / 2;
+    return { x: Math.min(1, Math.max(0, (e.clientX - left) / w)), y: Math.min(1, Math.max(0, (e.clientY - top) / h)) };
+  };
+  let start = null;
+  view.onpointerdown = e => { start = norm(e); view.setPointerCapture(e.pointerId); };
+  view.onpointermove = e => {
+    if (!start) return;
+    const p = norm(e);
+    setRegion(c, { x: Math.min(start.x, p.x), y: Math.min(start.y, p.y), w: Math.abs(p.x - start.x), h: Math.abs(p.y - start.y) });
+  };
+  view.onpointerup = () => {
+    start = null;
+    if (c.region && (c.region.w < 0.01 || c.region.h < 0.01)) setRegion(c, null);  // a click clears
+  };
+  for (const i of inputs) i.oninput = () => {
+    const v = Object.fromEntries(inputs.map(j => [j.dataset.k, parseFloat(j.value)]));
+    setRegion(c, Object.values(v).every(Number.isFinite) && v.w > 0 && v.h > 0 ? v : null, false);
+  };
+}
+
+function setRegion(c, r, writeInputs = true) {
+  c.region = r;
+  const box = $(".region", c.el), img = $("img", c.el), view = $(".view", c.el);
+  box.hidden = !r;
+  if (writeInputs) for (const i of c.el.querySelectorAll("input[data-k]")) i.value = r ? r[i.dataset.k].toFixed(3) : "";
+  if (!r) return;
+  // Position over the letterboxed image area.
+  const vr = view.getBoundingClientRect();
+  const ar = img.naturalWidth && img.naturalHeight ? img.naturalWidth / img.naturalHeight : vr.width / vr.height;
+  const w = Math.min(vr.width, vr.height * ar), h = w / ar;
+  const ox = (vr.width - w) / 2, oy = (vr.height - h) / 2;
+  Object.assign(box.style, { left: `${ox + r.x * w}px`, top: `${oy + r.y * h}px`, width: `${r.w * w}px`, height: `${r.h * h}px` });
+}
+addEventListener("resize", () => { for (const c of cams.values()) if (c.region) setRegion(c, c.region, false); });
+
+// ---- actions --------------------------------------------------------------
+
+async function post(path, body) {
+  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const d = await r.json().catch(() => ({ message: `HTTP ${r.status}` }));
+  if (!r.ok) throw Object.assign(new Error(d.message || `HTTP ${r.status}`), { code: d.error });
+  return d;
+}
+
+async function openCam(c) {
+  uiEvent(`${c.info.name}: open requested`);
+  try { await post("/api/open", { camera: c.id }); uiEvent(`${c.info.name}: open ok`); }
+  catch (e) { uiEvent(`${c.info.name}: open failed [${e.code}] ${e.message}`); }
+}
+
+const resultsEl = $("#results");
+$("#clearResults").onclick = () => { resultsEl.textContent = ""; };
+
+async function capture(c, detail, btn) {
+  const buttons = c.el.querySelectorAll("button.primary");
+  buttons.forEach(b => b.disabled = true);
+  const label = `${c.info.name} · ${detail}` + (c.region ? " · region" : "");
+  try {
+    const d = await post("/api/capture", { camera: c.id, detail, region: c.region });
+    showResult(label, d);
+    uiEvent(`${label}: sharpness ${d.sharpness.toFixed(1)}, frame age ${d.frame_age_ms} ms, ${d.elapsed_ms} ms`);
+  } catch (e) {
+    const el = document.createElement("div");
+    el.className = "result error";
+    el.textContent = `${fmtTime(Date.now())} ${label}: [${e.code || "error"}] ${e.message}`;
+    resultsEl.prepend(el);
+    uiEvent(`${label}: capture failed [${e.code}] ${e.message}`);
+  } finally {
+    buttons.forEach(b => b.disabled = false);
+  }
+}
+
+function showResult(label, d) {
+  const el = document.createElement("div");
+  el.className = "result";
+  el.innerHTML = `<div class="rh"><b></b><span></span></div><div class="imgbox"><img alt=""></div><dl></dl><div class="cands"></div>`;
+  $(".rh b", el).textContent = label;
+  $(".rh span", el).textContent = fmtTime(Date.parse(d.captured_at));
+  $("img", el).src = d.image;
+  $("img", el).onclick = () => $(".imgbox", el).classList.toggle("zoom");
+  const rg = d.region;
+  const rows = [
+    ["sharpness", d.sharpness.toFixed(1)],
+    ["frame age", `${d.frame_age_ms} ms`],
+    ["round trip", `${d.elapsed_ms} ms`],
+    ["image", `${d.width}×${d.height} · ${(d.bytes / 1024).toFixed(0)} KB`],
+    ["source", `${d.source_size[0]}×${d.source_size[1]}`],
+    ["crop px", `${d.crop_px.x},${d.crop_px.y} ${d.crop_px.width}×${d.crop_px.height}`],
+    ["region", rg ? [rg.x, rg.y, rg.w, rg.h].map(v => v.toFixed(3)).join(", ") : "full frame"],
+  ];
+  $("dl", el).append(...rows.flatMap(([k, v]) => {
+    const dt = document.createElement("dt"), dd = document.createElement("dd");
+    dt.textContent = k; dd.textContent = v; return [dt, dd];
+  }));
+  // Candidate frames oldest first; the returned frame is the sharpest. Scores are usually close,
+  // so bars span min..max rather than 0..max.
+  const cands = d.candidate_sharpness, max = Math.max(...cands), min = Math.min(...cands), best = cands.indexOf(max);
+  const box = $(".cands", el);
+  box.append(...cands.flatMap((s, i) => {
+    const n = document.createElement("span"), bar = document.createElement("div"), v = document.createElement("span");
+    n.textContent = `#${i + 1}`;
+    bar.className = "bar" + (i === best ? " best" : "");
+    bar.style.width = `${max > min ? 5 + 95 * (s - min) / (max - min) : 100}%`;
+    v.textContent = s.toFixed(1);
+    return [n, bar, v];
+  }));
+  const spread = min > 0 ? ` · spread ${((max / min - 1) * 100).toFixed(1)}%` : "";
+  box.prepend(Object.assign(document.createElement("span"), {
+    textContent: `${cands.length} candidates, oldest first (bars scaled min→max${spread})`, style: "grid-column: 1 / -1; color: var(--muted)" }));
+  resultsEl.prepend(el);
+  while (resultsEl.children.length > 10) resultsEl.lastChild.remove();
+}
+
+pollStatus();
+pollEvents();
+</script>
+</body>
+</html>

@@ -16,13 +16,14 @@
 //   POST /open     {"camera": "front"}
 //   POST /capture  {"camera": "desk", "region": {"x":0.4,"y":0.4,"w":0.2,"h":0.2}, "max_edge": 1568, "quality": 0.85}
 //                  region is normalized, top-left origin; omitted = full frame.
+//   GET  /preview?camera=ID&max_edge=640
+//                  newest buffered frame as image/jpeg (header X-Frame-Age-Ms), for live preview.
+//                  Never opens or reopens a stream; 409 not_open if the camera isn't streaming.
+//   GET  /events?after=SEQ
+//                  recent log lines {"events":[{"seq","time","message"}],"last_seq":N}
 
 import AVFoundation
 import Foundation
-
-func log(_ s: String) {
-    FileHandle.standardError.write(Data("[camsvc] \(s)\n".utf8))
-}
 
 func emit(_ obj: [String: Any]) {
     let data = try! JSONSerialization.data(withJSONObject: obj)
@@ -98,6 +99,15 @@ let server = try HTTPServer(port: port) { req in
             return HTTPResponse(status: 200, json: ["ok": true])
         case ("POST", "/capture"):
             return HTTPResponse(status: 200, json: try service.capture(parseCapture(req.body)))
+        case ("GET", "/preview"):
+            guard let camera = req.query["camera"] else { throw ServiceError.badRequest("missing 'camera' query parameter") }
+            let maxEdge = max(64, min(2048, Int(req.query["max_edge"] ?? "") ?? 640))
+            let p = try service.preview(camera, maxEdge: maxEdge)
+            return HTTPResponse(status: 200, contentType: "image/jpeg", body: p.jpeg,
+                                headers: ["X-Frame-Age-Ms": "\(p.ageMs)", "X-Source-Size": "\(p.width)x\(p.height)"])
+        case ("GET", "/events"):
+            let r = eventLog.since(Int(req.query["after"] ?? "") ?? 0)
+            return HTTPResponse(status: 200, json: ["events": r.events, "last_seq": r.lastSeq])
         default:
             return HTTPResponse(status: 404, json: ["error": "not_found", "message": "\(req.method) \(req.path)"])
         }

@@ -10,6 +10,7 @@ import asyncio
 import base64
 import json
 import os
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +21,17 @@ from .base import CameraError, CameraInfo, Capture, Detail, Region
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_BINARY = REPO_ROOT / "camera-service" / ".build" / "release" / "camsvc"
+
+
+def build_helper() -> None:
+    """Builds (or incrementally rebuilds) the default camsvc binary; a no-op build takes well under a second."""
+    cmd = ["swift", "build", "-c", "release", "--package-path", str(REPO_ROOT / "camera-service")]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        raise CameraError("helper_build_failed", "swift not found; install the Xcode command line tools")
+    if result.returncode != 0:
+        raise CameraError("helper_build_failed", f"{' '.join(cmd)} failed:\n{result.stdout}{result.stderr}")
 
 # Long-edge pixel caps per detail level. Current Claude models accept up to 2576px; the
 # overview cap keeps a whole-scene look around ~1.2k image tokens.
@@ -65,6 +77,11 @@ class ContinuityCameraSource:
                 self._proc.kill()
         if self._stdout_task:
             self._stdout_task.cancel()
+
+    @property
+    def base_url(self) -> str | None:
+        """URL of the helper's HTTP API (known once started), for diagnostics such as the test UI."""
+        return self._base_url
 
     async def __aenter__(self) -> ContinuityCameraSource:
         await self.start()

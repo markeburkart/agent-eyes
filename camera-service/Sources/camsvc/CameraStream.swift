@@ -68,6 +68,9 @@ final class CameraStream: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         return lock.withLock { ring.filter { $0.capturedAt >= cutoff } }
     }
 
+    /// Newest buffered frame regardless of age; nil before the first frame or after stop().
+    var latestFrame: Frame? { lock.withLock { ring.last } }
+
     /// Blocks until at least `count` fresh frames are buffered or the timeout passes.
     func waitForFrames(_ count: Int, maxAge: TimeInterval, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
