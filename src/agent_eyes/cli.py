@@ -4,6 +4,7 @@
     agent-eyes --allow-builtin       ... also showing the Mac's own cameras
     agent-eyes camera list
     agent-eyes camera capture --view desk --detail inspect --region 0.4,0.4,0.2,0.2 --out cap.jpg
+    agent-eyes chat                  talk to the agent by typing (one line per turn)
 
 Every command builds and spawns the camsvc helper unless --url points at one already running.
 """
@@ -15,8 +16,8 @@ import asyncio
 import os
 import sys
 
-from .camera import CameraError, ContinuityCameraSource, Region
-from .camera.continuity import build_helper
+from .camera import CameraError, CameraSource, ContinuityCameraSource, Region
+from .camera.continuity import REPO_ROOT, build_helper
 
 
 def main() -> None:
@@ -25,7 +26,7 @@ def main() -> None:
     helper.add_argument("--allow-builtin", action="store_true", help="also expose the Mac's own cameras")
 
     p = argparse.ArgumentParser(prog="agent-eyes", description="Hands-free voice and vision assistant for the workbench.")
-    sub = p.add_subparsers(dest="cmd", metavar="{ui,camera}")
+    sub = p.add_subparsers(dest="cmd", metavar="{ui,camera,chat}")
     ui = sub.add_parser("ui", parents=[helper], help="open the app in the browser (default)")
     ui.add_argument("--port", type=int, default=8765, help="port for the web UI (default 8765)")
     ui.add_argument("--open", default="front,desk", help="cameras to open at startup (default front,desk)")
@@ -39,6 +40,11 @@ def main() -> None:
     c.add_argument("--region", help="x,y,w,h normalized 0..1")
     c.add_argument("--out", default="capture.jpg")
 
+    chat = sub.add_parser("chat", parents=[helper], help="talk to the agent by typing")
+    chat.add_argument("--model", default=None, help="Claude model (default: the agent's default)")
+    chat.add_argument("--per-turn", type=int, default=3, help="max captures per turn (default 3)")
+    chat.add_argument("--per-minute", type=int, default=10, help="max captures per rolling minute (default 10)")
+
     # No subcommand (or only options) means the app.
     argv = sys.argv[1:]
     if not argv or (argv[0].startswith("-") and argv[0] not in ("-h", "--help")):
@@ -50,6 +56,8 @@ def main() -> None:
 
         source = make_source(args, tuple(filter(None, args.open.split(","))))
         serve(source, port=args.port, open_browser=not args.no_browser)
+    elif args.cmd == "chat":
+        sys.exit(asyncio.run(chat_command(args)))
     else:
         sys.exit(asyncio.run(camera_command(args)))
 
@@ -81,6 +89,54 @@ async def camera_command(args: argparse.Namespace) -> int:
             print(f"{args.out}: {cap.width}x{cap.height} from {cap.camera.name} {cap.source_size} "
                   f"region={cap.region} sharpness={cap.sharpness:.1f} extra={cap.extra}")
             return 0
+    except CameraError as e:
+        print(f"error [{e.code}]: {e.message}", file=sys.stderr)
+        return 1
+
+
+async def chat_command(args: argparse.Namespace, source: CameraSource | None = None) -> int:
+    """Typed conversation with the agent. Captures are saved under captures/chat/ for review."""
+    from .agent import DEFAULT_MODEL, CaptureBudget, CaptureEvent, EyesAgent, TurnResult
+
+    out_dir = REPO_ROOT / "captures" / "chat"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def show_capture(e: CaptureEvent) -> None:
+        if e.capture is None:
+            print(f"  [look {e.view} {e.detail} failed: {e.error}] {e.reason}", flush=True)
+            return
+        cap = e.capture
+        path = out_dir / f"{cap.captured_at:%Y%m%d-%H%M%S-%f}-{e.view}-{e.detail}.jpg"
+        path.write_bytes(cap.image)
+        region = f" region={cap.region.x:.2f},{cap.region.y:.2f},{cap.region.w:.2f},{cap.region.h:.2f}" if cap.region else ""
+        print(f"  [look {e.view} {e.detail}{region} {cap.width}x{cap.height}] {e.reason} -> {path.name}", flush=True)
+
+    source = source or make_source(args, ("front",))
+    interactive = sys.stdin.isatty()
+    try:
+        async with source, EyesAgent(
+            source,
+            CaptureBudget(per_turn=args.per_turn, per_minute=args.per_minute),
+            model=args.model or DEFAULT_MODEL,
+            on_capture=show_capture,
+        ) as agent:
+            while True:
+                if interactive:
+                    print("you> ", end="", flush=True)
+                line = await asyncio.to_thread(sys.stdin.readline)
+                if not line:
+                    return 0
+                if not (text := line.strip()):
+                    continue
+                if not interactive:
+                    print(f"you> {text}", flush=True)
+                async for part in agent.ask(text):
+                    if isinstance(part, TurnResult):
+                        # The SDK reports the session's running total, not this turn's cost.
+                        cost = f", session ${part.cost_usd:.4f}" if part.cost_usd is not None else ""
+                        print(f"  ({part.duration_ms / 1000:.1f}s{cost}{' error' if part.is_error else ''})", flush=True)
+                    else:
+                        print(f"eyes> {part}", flush=True)
     except CameraError as e:
         print(f"error [{e.code}]: {e.message}", file=sys.stderr)
         return 1

@@ -24,11 +24,21 @@ uv run agent-eyes camera list
 uv run agent-eyes camera capture --view desk --detail inspect --region 0.4,0.4,0.2,0.2 --out cap.jpg
 ```
 
+Talk to the agent by typing (one line per turn; Ctrl-D to quit). It uses your Claude Code login
+and decides on its own when to look through the camera. Each capture is printed with the
+agent's reason and saved under `captures/chat/`.
+
+```sh
+uv run agent-eyes chat                               # up to 3 captures per turn, 10 per minute
+uv run agent-eyes chat --per-turn 1 --per-minute 4   # tighter capture budget
+```
+
 ## Layout
 
 ```
 src/agent_eyes/
   cli.py           the agent-eyes command
+  agent/           Claude Agent SDK session (session.py), capture_frame tool (tools.py), capture budget (budget.py)
   camera/          camera abstraction (base.py) and the camsvc-backed source (continuity.py)
   web/             local web server (server.py) and browser views (static/)
 camera-service/    camsvc: Swift helper that owns the cameras (built automatically on launch)
