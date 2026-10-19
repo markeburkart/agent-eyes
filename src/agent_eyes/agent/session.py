@@ -29,8 +29,7 @@ When to look:
 connected, where a wire goes, whether a joint looks good), or when the user asks you to look \
 or check something.
 - Don't look for general knowledge questions, conversation, or things the user just told you.
-- The "front" camera is the main view, looking down at the work area. "desk" is a secondary \
-view that may not show the work area.
+- There is one camera, "front": the user's phone on an arm, looking down at the work area.
 - Start with an overview. To read small parts, call inspect with a region taken from that \
 overview, as fractions of the frame from the top-left.
 - If a capture fails or you are over the capture budget, say so briefly instead of guessing \

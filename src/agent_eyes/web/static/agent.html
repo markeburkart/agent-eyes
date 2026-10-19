@@ -1,0 +1,511 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Agent Eyes</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --panel: #fff; --ink: #1d1d1b; --muted: #6b6b66; --line: #e2e1dc;
+    --ok: #1f7a3d; --ok-bg: #e3f3e7; --warn: #8a5a00; --warn-bg: #fbefd5; --bad: #b3261e; --bad-bg: #fbe3e1;
+    --accent: #2457c5; --accent-bg: #e6edfb; --look: #ffd60a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615; --panel: #1f1f1d; --ink: #ecebe6; --muted: #9a9993; --line: #33322f;
+      --ok: #6fd08f; --ok-bg: #173322; --warn: #f0c060; --warn-bg: #3a2e12; --bad: #ff8a80; --bad-bg: #3d1b19;
+      --accent: #7aa2ff; --accent-bg: #1d2a47;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; font: 14px/1.45 -apple-system, system-ui, sans-serif; background: var(--bg); color: var(--ink); display: flex; flex-direction: column; }
+  header { display: flex; gap: 10px; align-items: center; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0 6px 0 0; }
+  header .spacer { flex: 1; }
+  header a { color: var(--accent); font-size: 13px; }
+  main { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 34%); gap: 16px; padding: 16px; }
+  .col { display: flex; flex-direction: column; gap: 16px; min-height: 0; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  .panel > h2 { font-size: 13px; margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 8px; }
+  .panel > h2 .spacer { flex: 1; }
+  .panel > h2 .sub { color: var(--muted); font-weight: normal; }
+  .badge { padding: 2px 8px; border-radius: 10px; font-size: 12px; background: var(--bg); color: var(--muted); border: 1px solid var(--line); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .badge.ok { background: var(--ok-bg); color: var(--ok); border-color: transparent; }
+  .badge.warn { background: var(--warn-bg); color: var(--warn); border-color: transparent; }
+  .badge.bad { background: var(--bad-bg); color: var(--bad); border-color: transparent; }
+  .badge.busy { background: var(--accent-bg); color: var(--accent); border-color: transparent; }
+  button { font: inherit; font-size: 13px; padding: 4px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+  button:disabled { opacity: .45; cursor: default; }
+
+  /* live view */
+  #live { flex: 1; min-height: 240px; display: flex; flex-direction: column; }
+  .view { position: relative; flex: 1; min-height: 0; margin: 10px; background: #000; border-radius: 6px; overflow: hidden; }
+  .view img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  .view img:not([src]) { visibility: hidden; }
+  .view.dead img { opacity: .3; filter: grayscale(1); }
+  .view .frame { position: absolute; pointer-events: none; }
+  .view .look { position: absolute; border: 3px solid var(--look); border-radius: 2px; transition: opacity 1.5s; }
+  .view .look span { position: absolute; left: -3px; bottom: 100%; max-width: 60vw; padding: 2px 8px; background: var(--look); color: #000; font-size: 13px; font-weight: 600; border-radius: 3px 3px 3px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .view .look.inside span { bottom: auto; top: 0; left: 0; border-radius: 0 0 3px 0; }
+  .view .look.fade { opacity: 0; }
+  .view .alert { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); max-width: 80%; padding: 10px 16px; border-radius: 6px; background: rgba(179,38,30,.92); color: #fff; font-size: 16px; font-weight: 600; text-align: center; }
+  .view .alert small { display: block; font-weight: normal; font-size: 13px; margin-top: 4px; }
+  .view .alert:empty { display: none; }
+
+  /* filmstrip */
+  #strip { display: flex; gap: 10px; overflow-x: auto; padding: 10px; min-height: 218px; }
+  #strip:empty::before { content: "The agent's captures appear here, newest first, with its reason and the region it looked at."; color: var(--muted); padding: 4px; }
+  .shot { flex: 0 0 210px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; cursor: pointer; background: var(--bg); display: flex; flex-direction: column; }
+  .shot:hover { border-color: var(--accent); }
+  .shot .thumb { position: relative; height: 118px; background: #000; }
+  .shot .thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .shot .mini { position: absolute; right: 4px; bottom: 4px; height: 36px; border: 1px solid rgba(255,255,255,.8); background: rgba(0,0,0,.55); }
+  .shot .mini i { position: absolute; background: var(--look); min-width: 2px; min-height: 2px; }
+  .shot .meta { padding: 6px 8px; font-size: 12px; display: flex; flex-direction: column; gap: 2px; }
+  .shot .meta b { font-size: 12px; }
+  .shot .meta .reason { font-size: 13px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .shot .meta .muted { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .shot.failed { background: var(--bad-bg); border-color: transparent; cursor: default; }
+  .shot.failed .thumb { display: flex; align-items: center; justify-content: center; color: var(--bad); font: 600 14px ui-monospace, monospace; background: transparent; border-bottom: 1px dashed var(--bad); }
+  .shot.failed .meta .muted { color: var(--bad); }
+  .tag { display: inline-block; padding: 0 6px; border-radius: 3px; font-size: 11px; font-weight: 600; background: var(--accent-bg); color: var(--accent); margin-right: 4px; }
+  .tag.inspect { background: var(--look); color: #000; }
+
+  /* budget */
+  #budget .body { padding: 10px 12px; display: grid; grid-template-columns: max-content 1fr max-content; gap: 8px 10px; align-items: center; }
+  .meter { height: 10px; border-radius: 5px; background: var(--line); overflow: hidden; }
+  .meter i { display: block; height: 100%; background: var(--accent); transition: width .3s; }
+  .meter.full i { background: var(--bad); }
+  .stepper { display: inline-flex; align-items: center; gap: 4px; font-variant-numeric: tabular-nums; }
+  .stepper button { padding: 0 8px; }
+  .stepper output { min-width: 4.5em; text-align: center; }
+  #budgetNote { grid-column: 1 / -1; color: var(--muted); font-size: 12px; min-height: 1.2em; }
+  #budgetNote.bad { color: var(--bad); }
+  label.toggle { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; font-weight: normal; cursor: pointer; }
+
+  /* transcript */
+  #talk { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  #transcript { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+  #transcript:not(:has(.msg, .note))::before { content: "Ask the agent something. It decides on its own when to look through the camera."; color: var(--muted); }
+  .msg { max-width: 88%; padding: 7px 12px; border-radius: 12px; font-size: 16px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 3px; }
+  .msg.agent { align-self: flex-start; background: var(--bg); border: 1px solid var(--line); border-bottom-left-radius: 3px; }
+  .note { align-self: flex-start; font-size: 12px; color: var(--muted); padding-left: 4px; cursor: default; }
+  .note.look { cursor: pointer; }
+  .note.look:hover { color: var(--accent); }
+  .note.bad { color: var(--bad); }
+  .note.center { align-self: center; }
+  .thinking { align-self: flex-start; color: var(--muted); font-size: 13px; padding-left: 4px; }
+  .thinking::after { content: "…"; animation: dots 1.2s steps(4) infinite; display: inline-block; width: 1.2em; overflow: hidden; vertical-align: bottom; }
+  @keyframes dots { from { width: 0 } to { width: 1.2em } }
+  form { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--line); }
+  form input { flex: 1; font: inherit; font-size: 16px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); }
+
+  /* lightbox */
+  dialog { border: none; border-radius: 8px; padding: 0; max-width: 94vw; max-height: 94vh; background: var(--panel); color: var(--ink); }
+  dialog::backdrop { background: rgba(0,0,0,.7); }
+  dialog .box { display: flex; flex-direction: column; max-height: 94vh; }
+  dialog .imgwrap { overflow: auto; background: #000; min-height: 0; }
+  /* Scaled to fit (up as well as down, so small inspect crops are readable); click for 1:1 pixels. */
+  dialog img { display: block; width: 92vw; height: 76vh; object-fit: contain; cursor: zoom-in; }
+  dialog .imgwrap.zoom img { width: auto; height: auto; }
+  dialog .imgwrap.zoom img { cursor: zoom-out; }
+  dialog .info { padding: 10px 14px; display: flex; gap: 16px; align-items: start; }
+  dialog .info .text { flex: 1; }
+  dialog .info .reason { font-size: 16px; margin-bottom: 4px; }
+  dialog .info .muted { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  dialog .mini { position: relative; height: 90px; flex: none; border: 1px solid var(--line); background: var(--bg); }
+  dialog .mini i { position: absolute; background: var(--look); border: 1px solid #000; min-width: 3px; min-height: 3px; }
+
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } #live { min-height: 50vh; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Agent Eyes</h1>
+  <span id="agentState" class="badge">agent …</span>
+  <span id="camState" class="badge">camera …</span>
+  <span id="cost" class="badge" title="Total for this conversation, as the SDK reports it">$ —</span>
+  <span class="spacer"></span>
+  <a href="/cameras" target="_blank">camera diagnostics</a>
+  <button id="restart" title="Start over: the agent forgets this conversation">New conversation</button>
+</header>
+<main>
+  <div class="col">
+    <div id="live" class="panel">
+      <h2>Camera<span class="sub" id="camName"></span><span class="spacer"></span><span class="sub" id="frameInfo"></span></h2>
+      <div class="view dead"><img alt=""><div class="frame"></div><div class="alert"></div></div>
+    </div>
+    <div class="panel">
+      <h2>Captures<span class="sub" id="shotCount"></span><span class="spacer"></span><span class="sub">click to enlarge</span></h2>
+      <div id="strip"></div>
+    </div>
+  </div>
+  <div class="col">
+    <div id="budget" class="panel">
+      <h2>Capture budget<span class="spacer"></span><label class="toggle"><input type="checkbox" id="eyesOn" checked> agent may look</label></h2>
+      <div class="body">
+        <span>This turn</span><div class="meter" id="turnMeter"><i></i></div>
+        <span class="stepper"><button data-k="per_turn" data-d="-1">−</button><output id="turnOut">–</output><button data-k="per_turn" data-d="1">+</button></span>
+        <span>Last minute</span><div class="meter" id="minMeter"><i></i></div>
+        <span class="stepper"><button data-k="per_minute" data-d="-1">−</button><output id="minOut">–</output><button data-k="per_minute" data-d="1">+</button></span>
+        <div id="budgetNote"></div>
+      </div>
+    </div>
+    <div id="talk" class="panel">
+      <h2>Conversation<span class="spacer"></span><span class="sub" id="outDir"></span></h2>
+      <div id="transcript"></div>
+      <form id="ask">
+        <input id="text" autocomplete="off" placeholder="Type to the agent and press Enter" autofocus>
+        <button type="submit" class="primary" id="send">Send</button>
+        <button type="button" class="danger" id="stop" hidden>Stop</button>
+      </form>
+    </div>
+  </div>
+</main>
+<dialog id="lightbox">
+  <div class="box">
+    <div class="imgwrap"><img alt=""></div>
+    <div class="info"><div class="mini"></div><div class="text"><div class="reason"></div><div class="muted"></div></div><button id="closeBox">Close</button></div>
+  </div>
+</dialog>
+<script>
+"use strict";
+// Must match the helper's CaptureService.maxFrameAge: older frames are never returned to the agent.
+const STALE_MS = 1500;
+const $ = (s, el = document) => el.querySelector(s);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const fmtTime = t => new Date(t).toLocaleTimeString([], { hour12: false });
+const fmtRegion = r => r ? `x ${r.x.toFixed(2)} y ${r.y.toFixed(2)} w ${r.w.toFixed(2)} h ${r.h.toFixed(2)}` : "full frame";
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+
+async function post(path, body = {}) {
+  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const d = await r.json().catch(() => ({ message: `HTTP ${r.status}` }));
+  if (!r.ok) throw Object.assign(new Error(d.message || `HTTP ${r.status}`), { code: d.error });
+  return d;
+}
+
+let session = null;   // latest /api/session summary
+let front = null;     // camera reference the agent uses as "front"
+let frontId = null;   // its device id once seen; previews by id keep working while the phone is out of discovery
+
+// ---- session summary: agent state, cost, budget -----------------------------
+
+const agentStateEl = $("#agentState"), costEl = $("#cost");
+const sendBtn = $("#send"), stopBtn = $("#stop"), textEl = $("#text");
+
+function applySession(s) {
+  session = s;
+  front = s.camera;
+  const st = { starting: ["agent starting…", "busy"], ready: ["agent ready", "ok"], thinking: ["agent thinking…", "busy"], error: ["agent error", "bad"] }[s.state];
+  agentStateEl.className = "badge " + st[1];
+  agentStateEl.textContent = st[0];
+  agentStateEl.title = s.error || s.model;
+  costEl.textContent = s.cost_usd == null ? "$ —" : `$${s.cost_usd.toFixed(4)}`;
+  sendBtn.disabled = s.state !== "ready";
+  stopBtn.hidden = s.state !== "thinking";
+  $("#outDir").textContent = s.out_dir.split("/").slice(-2).join("/");
+  $("#outDir").title = `transcript.jsonl and captures are saved in ${s.out_dir}`;
+  $("#thinking")?.toggleAttribute("hidden", s.state !== "thinking");
+  applyBudget(s.budget);
+}
+
+function applyBudget(b) {
+  const meter = (id, used, max) => {
+    const m = $(id);
+    m.classList.toggle("full", used >= max);
+    $("i", m).style.width = `${max ? Math.min(100, 100 * used / max) : 100}%`;
+  };
+  meter("#turnMeter", b.used_turn, b.per_turn);
+  meter("#minMeter", b.used_minute, b.per_minute);
+  $("#turnOut").textContent = `${b.used_turn} / ${b.per_turn}`;
+  $("#minOut").textContent = `${b.used_minute} / ${b.per_minute}`;
+  if (document.activeElement !== $("#eyesOn")) $("#eyesOn").checked = !b.paused;
+  const note = $("#budgetNote");
+  note.className = b.blocked ? "bad" : "";
+  note.textContent = b.paused ? "Camera is off for the agent: it will say it can't look."
+    : b.used_minute >= b.per_minute ? `Per-minute limit reached; next capture allowed in ${Math.ceil(b.next_in_s)} s.`
+    : `Up to ${b.per_turn} per turn and ${b.per_minute} per rolling minute.`;
+}
+
+async function setBudget(change) {
+  try { applySession(await post("/api/session/budget", change)); }
+  catch (e) { addNote(`budget change failed: ${e.message}`, "bad center"); }
+}
+for (const b of document.querySelectorAll(".stepper button")) b.onclick = () => {
+  const k = b.dataset.k, v = session.budget[k] + Number(b.dataset.d);
+  if (v >= 0 && v <= 100) setBudget({ [k]: v });
+};
+$("#eyesOn").onchange = e => setBudget({ paused: !e.target.checked });
+
+async function pollSession() {
+  for (;;) {
+    try { const r = await fetch("/api/session"); if (r.ok) applySession(await r.json()); } catch {}
+    await sleep(1000);
+  }
+}
+
+// ---- transcript and filmstrip from session events -------------------------
+
+const transcript = $("#transcript"), strip = $("#strip");
+const shots = new Map();  // capture id -> event
+
+function scrollDown() { transcript.scrollTop = transcript.scrollHeight; }
+function append(node) {
+  const atEnd = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 60;
+  const thinking = $("#thinking");
+  transcript.insertBefore(node, thinking);
+  if (atEnd) scrollDown();
+  return node;
+}
+function addNote(text, cls = "") { return append(el("div", "note " + cls, text)); }
+
+function handle(e, live) {
+  switch (e.type) {
+    case "user":
+      append(el("div", "msg user", e.text));
+      ensureThinking();
+      scrollDown();
+      break;
+    case "agent":
+      append(el("div", "msg agent", e.text));
+      break;
+    case "capture": {
+      addShot(e);
+      const what = `${e.detail}${e.region ? " of a region" : ""}`;
+      const n = addNote(e.error ? `couldn't look (${e.error}): ${e.reason}` : `looked · ${what} · ${e.reason}`, e.error ? "bad" : "look");
+      if (!e.error) { n.onclick = () => openShot(e); n.title = fmtRegion(e.region); }
+      if (live && !e.error) showLook(e);
+      break;
+    }
+    case "turn": {
+      const cost = e.cost_usd != null ? ` · conversation $${e.cost_usd.toFixed(4)}` : "";
+      addNote(`${fmtTime(e.time)} · ${(e.duration_ms / 1000).toFixed(1)} s${cost}${e.is_error ? " · error" : ""}`, e.is_error ? "bad" : "");
+      break;
+    }
+    case "status":
+      addNote(`${fmtTime(e.time)} · ${e.text}`, "center" + (e.error ? " bad" : ""));
+      break;
+  }
+}
+
+function ensureThinking() {
+  if ($("#thinking")) return;
+  const t = el("div", "thinking", "thinking");
+  t.id = "thinking";
+  t.hidden = session?.state !== "thinking";
+  transcript.append(t);
+}
+
+// Map of the whole frame with the captured region marked (hidden for full-frame captures).
+function miniRegion(box, e) {
+  box.hidden = !e.region;
+  if (!e.region) return;
+  const [w, h] = e.source_size;
+  box.style.aspectRatio = `${w} / ${h}`;
+  const i = el("i"), r = e.region;
+  Object.assign(i.style, { left: `${r.x * 100}%`, top: `${r.y * 100}%`, width: `${r.w * 100}%`, height: `${r.h * 100}%` });
+  box.replaceChildren(i);
+}
+
+function addShot(e) {
+  const card = el("div", "shot" + (e.error ? " failed" : ""));
+  const thumb = el("div", "thumb"), meta = el("div", "meta");
+  const head = el("div");
+  head.append(el("span", "tag " + e.detail, e.detail), el("span", "muted", fmtTime(e.time)));
+  meta.append(head, el("div", "reason", e.reason));
+  if (e.error) {
+    thumb.textContent = e.error;
+    meta.append(el("div", "muted", e.message.replace(/ (The camera|The phone|Capture budget|Tell the user).*$/, "")));
+  } else {
+    const img = el("img"); img.src = e.image; img.loading = "lazy";
+    const mini = el("div", "mini"); miniRegion(mini, e);
+    thumb.append(img, mini);
+    meta.append(el("div", "muted", `${fmtRegion(e.region)} · ${e.width}×${e.height}`));
+    card.onclick = () => openShot(e);
+    card.onmouseenter = () => showLook(e, true);
+    card.onmouseleave = () => hideLook();
+    shots.set(e.id, e);
+  }
+  card.prepend(thumb);
+  card.append(meta);
+  strip.prepend(card);
+  $("#shotCount").textContent = `${shots.size} this session`;
+}
+
+// ---- lightbox ---------------------------------------------------------------
+
+const box = $("#lightbox");
+function openShot(e) {
+  $("img", box).src = e.image;
+  $(".imgwrap", box).classList.remove("zoom");
+  $(".reason", box).textContent = e.reason;
+  $(".muted", box).textContent = [`${e.detail} · ${fmtRegion(e.region)}`, `${e.width}×${e.height} from ${e.source_size.join("×")}`,
+    e.sharpness != null ? `sharpness ${e.sharpness.toFixed(1)}` : null, e.frame_age_ms != null ? `frame age ${e.frame_age_ms} ms` : null,
+    `${e.camera} · ${new Date(e.time).toLocaleString()}`].filter(Boolean).join(" · ");
+  miniRegion($(".mini", box), e);
+  box.showModal();
+}
+$("img", box).onclick = () => $(".imgwrap", box).classList.toggle("zoom");
+$("#closeBox").onclick = () => box.close();
+box.onclick = e => { if (e.target === box) box.close(); };
+
+// ---- live camera view -------------------------------------------------------
+
+const view = $(".view"), viewImg = $("img", view), frameEl = $(".frame", view), alertEl = $(".alert", view);
+let previewUrl = null;
+
+// Keeps .frame exactly over the displayed (letterboxed) image so regions can be drawn in it.
+function layoutFrame() {
+  const vr = view.getBoundingClientRect();
+  const ar = viewImg.naturalWidth && viewImg.naturalHeight ? viewImg.naturalWidth / viewImg.naturalHeight : 4 / 3;
+  const w = Math.min(vr.width, vr.height * ar), h = w / ar;
+  Object.assign(frameEl.style, { left: `${(vr.width - w) / 2}px`, top: `${(vr.height - h) / 2}px`, width: `${w}px`, height: `${h}px` });
+}
+new ResizeObserver(layoutFrame).observe(view);
+
+let lookTimer = null;
+function showLook(e, hover = false) {
+  clearTimeout(lookTimer);
+  const r = e.region || { x: 0, y: 0, w: 1, h: 1 };
+  const b = el("div", "look" + (r.y < 0.06 ? " inside" : ""));
+  Object.assign(b.style, { left: `${r.x * 100}%`, top: `${r.y * 100}%`, width: `${r.w * 100}%`, height: `${r.h * 100}%` });
+  b.append(el("span", null, `${e.detail}: ${e.reason}`));
+  frameEl.replaceChildren(b);
+  if (!hover) lookTimer = setTimeout(() => { b.classList.add("fade"); lookTimer = setTimeout(hideLook, 1500); }, 6000);
+}
+function hideLook() { clearTimeout(lookTimer); frameEl.replaceChildren(); }
+
+async function previewLoop() {
+  for (;;) {
+    const t0 = performance.now();
+    if (frontId && !document.hidden) {
+      try {
+        const r = await fetch(`/api/preview?camera=${encodeURIComponent(frontId)}&max_edge=960`);
+        if (r.ok) {
+          const blob = await r.blob();
+          if (previewUrl) URL.revokeObjectURL(previewUrl);
+          viewImg.src = previewUrl = URL.createObjectURL(blob);
+          await viewImg.decode().catch(() => {});
+          layoutFrame();
+          view.classList.toggle("dead", Number(r.headers.get("X-Frame-Age-Ms")) > STALE_MS);
+        } else {
+          view.classList.add("dead");
+        }
+      } catch { view.classList.add("dead"); }
+    }
+    await sleep(Math.max(50, 200 - (performance.now() - t0)));
+  }
+}
+
+// Camera health from the helper: live, reconnecting (no fresh frames) or not available at all.
+const camStateEl = $("#camState");
+let staleSince = null, hadFrame = false;
+const opened = new Set();  // camera ids this page has asked the helper to open
+function setCam(cls, text, alert = "", hint = "") {
+  camStateEl.className = "badge " + cls;
+  camStateEl.textContent = text;
+  alertEl.replaceChildren();
+  if (alert) { alertEl.append(alert); if (hint) alertEl.append(el("small", null, hint)); }
+}
+function matches(c) { return c.role === front || c.id === front || c.name === front; }
+
+async function pollCamera() {
+  for (;;) {
+    if (front) {
+      try {
+        const r = await fetch("/api/cameras");
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.message || r.status);
+        const c = d.cameras.find(matches);
+        if (c) frontId = c.id;
+        // The helper only tries to open the camera at startup. If the phone turned up later, open it once;
+        // from then on the helper's own watchdog keeps it open and reconnects it.
+        if (c && !c.streaming && !opened.has(c.id)) {
+          opened.add(c.id);
+          post("/api/open", { camera: c.id }).catch(() => setTimeout(() => opened.delete(c.id), 5000));
+        }
+        $("#camName").textContent = c ? `${c.name}${c.role ? "" : ` (as front)`}` : front;
+        const age = c?.last_frame_age_ms;
+        if (age !== undefined) hadFrame = true;
+        if (!c) {
+          staleSince = null;
+          setCam("bad", "camera not available", "Phone camera not available",
+            "Keep the phone near the Mac, locked, on the same Apple ID, with Wi-Fi, Bluetooth and Continuity Camera on.");
+          $("#frameInfo").textContent = "";
+        } else if (age !== undefined && age <= STALE_MS) {
+          staleSince = null;
+          setCam("ok", "camera live");
+          $("#frameInfo").textContent = `${c.frame_width}×${c.frame_height} · frame age ${age} ms`;
+        } else {
+          staleSince ??= Date.now() - (age ?? 0);
+          const secs = ((Date.now() - staleSince) / 1000).toFixed(0);
+          const text = hadFrame ? `no fresh frames for ${secs} s` : "waiting for first frame";
+          setCam("warn", hadFrame ? "camera reconnecting" : "camera starting", text,
+            hadFrame ? "The helper reopens the stream on its own; reconnecting usually takes 3–8 s." : "");
+          $("#frameInfo").textContent = age !== undefined ? `last frame ${(age / 1000).toFixed(1)} s ago` : "";
+        }
+      } catch (e) {
+        setCam("bad", "camera helper unreachable", "Camera helper unreachable", String(e.message || e));
+      }
+    }
+    await sleep(700);
+  }
+}
+
+// ---- events -----------------------------------------------------------------
+
+let lastSeq = 0;
+async function pollEvents() {
+  let first = true;
+  for (;;) {
+    try {
+      const r = await fetch(`/api/session/events?after=${lastSeq}&wait=${first ? 0 : 15}`);
+      if (r.ok) {
+        const d = await r.json();
+        // A different session folder means agent-eyes was restarted: start over.
+        if (session && d.session.out_dir !== session.out_dir) { location.reload(); return; }
+        for (const e of d.events) handle(e, !first);
+        if (d.events.length) lastSeq = d.events.at(-1).seq;
+        applySession(d.session);
+        ensureThinking();
+        if (first) scrollDown();
+        first = false;
+        continue;
+      }
+    } catch {}
+    await sleep(1000);
+  }
+}
+
+// ---- actions ----------------------------------------------------------------
+
+$("#ask").onsubmit = async ev => {
+  ev.preventDefault();
+  const text = textEl.value.trim();
+  if (!text || sendBtn.disabled) return;
+  sendBtn.disabled = true;
+  try {
+    applySession(await post("/api/session/ask", { text }));
+    textEl.value = "";
+  } catch (e) {
+    addNote(`not sent: ${e.message}`, "bad center");
+    sendBtn.disabled = false;
+  }
+  textEl.focus();
+};
+stopBtn.onclick = () => post("/api/session/stop").catch(e => addNote(`stop failed: ${e.message}`, "bad center"));
+$("#restart").onclick = () => {
+  if (confirm("Start a new conversation? The agent forgets everything said so far.")) post("/api/session/restart").catch(() => {});
+};
+
+pollEvents();
+pollSession();
+pollCamera();
+previewLoop();
+</script>
+</body>
+</html>
