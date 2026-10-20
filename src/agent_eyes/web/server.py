@@ -1,9 +1,13 @@
 """Local web server for the browser views.
 
-Today it serves the camera page: live previews, per-camera status, captures and helper events.
-Captures go through the CameraSource (same detail levels as the agent); previews, status and
-events are proxied straight from the camsvc helper. Previews never open or reopen a stream, so
-they don't interfere with the helper's own stall recovery.
+  /         the agent dashboard: transcript, live view of the agent's camera, filmstrip of the
+            agent's captures (reason and region) and the capture budget with its controls
+  /cameras  the camera page: live previews, per-camera status, manual captures and helper events
+
+The agent runs in a LiveSession on the backend's event loop. Manual captures go through the
+CameraSource (same detail levels as the agent); previews, status and events are proxied straight
+from the camsvc helper. Previews never open or reopen a stream, so they don't interfere with the
+helper's own stall recovery.
 """
 
 from __future__ import annotations
@@ -18,33 +22,71 @@ import webbrowser
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 import httpx
 
+from ..agent import CaptureBudget
 from ..camera import CameraError, ContinuityCameraSource, Region
+from .live import FrontAlias, LiveSession
 
 STATIC = Path(__file__).with_name("static")
-PAGES = {"/": "cameras.html", "/cameras": "cameras.html"}
+PAGES = {"/": "agent.html", "/cameras": "cameras.html"}
 
 
 class Backend:
-    """Runs the async camera source on its own event loop so threaded request handlers can use it."""
+    """Runs the async camera source and the agent on their own event loop so threaded request handlers can use them."""
 
-    def __init__(self, source: ContinuityCameraSource):
+    def __init__(self, source: ContinuityCameraSource, front: str, budget: CaptureBudget, out_dir: Path, model: str):
         self.source = source
+        self.front = front
+        """Camera reference the agent's "front" view uses (normally the role "front" itself)."""
         self.loop = asyncio.new_event_loop()
         threading.Thread(target=self.loop.run_forever, daemon=True).start()
         self.run(source.start())
         self.http = httpx.Client(base_url=source.base_url or "", timeout=10.0)
+        camera = source if front == "front" else FrontAlias(source, front)
+        self.session = LiveSession(camera, budget, out_dir, model=model)
+        # The agent takes a few seconds to connect; serve the page meanwhile.
+        self.spawn(self.session.start())
 
     def run(self, coro):
         return asyncio.run_coroutine_threadsafe(coro, self.loop).result()
 
+    def spawn(self, coro) -> None:
+        asyncio.run_coroutine_threadsafe(coro, self.loop)
+
+    def call(self, fn, *args):
+        """Runs a plain function on the loop (the session and budget aren't thread-safe)."""
+        async def wrapper():
+            return fn(*args)
+        return self.run(wrapper())
+
     def close(self) -> None:
         self.http.close()
-        self.run(self.source.close())
-        self.loop.call_soon_threadsafe(self.loop.stop)
+        try:
+            self.run(asyncio.wait_for(self.session.close(), 10))
+        except Exception:
+            pass
+        finally:
+            self.run(self.source.close())
+            self.loop.call_soon_threadsafe(self.loop.stop)
+
+    def session_summary(self) -> dict:
+        return {**self.call(self.session.summary), "camera": self.front}
+
+    def set_budget(self, body: dict) -> None:
+        budget = self.session.budget
+        def apply():
+            for k in ("per_turn", "per_minute"):
+                if k in body:
+                    v = int(body[k])
+                    if not 0 <= v <= 100:
+                        raise ValueError(f"{k} must be 0..100")
+                    setattr(budget, k, v)
+            if "paused" in body:
+                budget.paused = bool(body["paused"])
+        self.call(apply)
 
     def capture(self, body: dict) -> dict:
         r = body.get("region")
@@ -78,7 +120,22 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/favicon.ico":
             self._send(204, "image/x-icon", b"")
         elif url.path in ("/api/cameras", "/api/events", "/api/preview"):
-            self._proxy("GET", url.path.removeprefix("/api") + ("?" + urlencode(query) if query else ""))
+            self._proxy("GET", url.path.removeprefix("/api") + ("?" + urlencode(query, quote_via=quote) if query else ""))
+        elif url.path == "/api/session":
+            self._json(200, self.backend.session_summary())
+        elif url.path == "/api/session/events":
+            try:
+                after, wait = int(query.get("after", 0)), min(float(query.get("wait", 0)), 20)
+            except ValueError:
+                return self._json(400, {"error": "bad_request", "message": "after and wait must be numbers"})
+            events = self.backend.session.events_after(after, wait)
+            self._json(200, {"events": events, "session": self.backend.session_summary()})
+        elif url.path.startswith("/api/session/captures/"):
+            img = self.backend.session.image(url.path.rsplit("/", 1)[1])
+            if img:
+                self._send(200, img[0], img[1])
+            else:
+                self._json(404, {"error": "not_found", "message": url.path})
         else:
             self._json(404, {"error": "not_found", "message": url.path})
 
@@ -96,6 +153,27 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(502, {"error": e.code, "message": e.message})
             except (KeyError, TypeError, ValueError) as e:
                 self._json(400, {"error": "bad_request", "message": str(e)})
+        elif self.path == "/api/session/ask":
+            text = str(body.get("text", "")).strip()
+            if not text:
+                return self._json(400, {"error": "bad_request", "message": "text is empty"})
+            try:
+                self.backend.run(self.backend.session.ask(text))
+            except RuntimeError as e:
+                return self._json(409, {"error": "busy", "message": str(e)})
+            self._json(200, self.backend.session_summary())
+        elif self.path == "/api/session/stop":
+            self.backend.spawn(self.backend.session.interrupt())
+            self._json(200, self.backend.session_summary())
+        elif self.path == "/api/session/restart":
+            self.backend.spawn(self.backend.session.restart())
+            self._json(200, self.backend.session_summary())
+        elif self.path == "/api/session/budget":
+            try:
+                self.backend.set_budget(body)
+            except (TypeError, ValueError) as e:
+                return self._json(400, {"error": "bad_request", "message": str(e)})
+            self._json(200, self.backend.session_summary())
         else:
             self._json(404, {"error": "not_found", "message": self.path})
 
@@ -127,10 +205,19 @@ class Handler(BaseHTTPRequestHandler):
             super().log_message(format, *args)
 
 
-def serve(source: ContinuityCameraSource, port: int = 8765, open_browser: bool = True) -> None:
-    """Starts the camera source and serves the views until Ctrl-C, kill or the terminal closes."""
+def serve(
+    source: ContinuityCameraSource,
+    *,
+    front: str,
+    budget: CaptureBudget,
+    out_dir: Path,
+    model: str,
+    port: int = 8765,
+    open_browser: bool = True,
+) -> None:
+    """Starts the camera source and the agent, and serves the views until Ctrl-C, kill or the terminal closes."""
     try:
-        Handler.backend = Backend(source)
+        Handler.backend = Backend(source, front, budget, out_dir, model)
     except CameraError as e:
         raise SystemExit(f"error [{e.code}]: {e.message}")
     try:
@@ -140,6 +227,7 @@ def serve(source: ContinuityCameraSource, port: int = 8765, open_browser: bool =
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     page = f"http://127.0.0.1:{server.server_port}/"
     print(f"Agent Eyes on {page} (camera helper {source.base_url}); Ctrl-C to stop", flush=True)
+    print(f"session log and captures: {out_dir}", flush=True)
     if open_browser:
         webbrowser.open(page)
     # Treat kill and a closed terminal like Ctrl-C so the spawned helper is always stopped.
@@ -150,5 +238,8 @@ def serve(source: ContinuityCameraSource, port: int = 8765, open_browser: bool =
     except KeyboardInterrupt:
         pass
     finally:
+        # Closing the agent takes a moment; a second Ctrl-C must not leave the helper running.
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, signal.SIG_IGN)
         server.server_close()
         Handler.backend.close()

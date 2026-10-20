@@ -21,8 +21,7 @@ CAPTURE_SCHEMA = {
         "reason": {"type": "string", "description": "Why you need to look, in a few words. Shown to the user."},
         "view": {
             "type": "string",
-            "description": 'Which camera: "front" (the main camera, looking down at the work area) or "desk" (Desk View). '
-            "A camera id also works.",
+            "description": 'Which camera. Use "front": the main camera, looking down at the work area.',
         },
         "detail": {
             "type": "string",
@@ -78,7 +77,11 @@ def capture_server(camera: CameraSource, budget: CaptureBudget, on_capture: Call
         try:
             cap = await camera.capture(view, detail, region, reason=reason)
         except CameraError as e:
-            hint = " The camera may still be reconnecting; tell the user it isn't ready yet." if e.code == "no_frames" else ""
+            hint = {
+                "no_frames": " The camera may still be reconnecting; tell the user it isn't ready yet.",
+                "unknown_camera": " The phone camera isn't available right now; tell the user. It shows up when the phone "
+                "is near the Mac and locked, with Wi-Fi, Bluetooth and Continuity Camera on; no app needs to run.",
+            }.get(e.code, "")
             return fail(e.code, e.message + hint)
 
         budget.record()

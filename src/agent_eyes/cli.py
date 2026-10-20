@@ -1,7 +1,8 @@
 """Agent Eyes command line.
 
-    agent-eyes                       open the app in the browser (camera views for now)
-    agent-eyes --allow-builtin       ... also showing the Mac's own cameras
+    agent-eyes                       start the camera, the agent and its dashboard in the browser
+    agent-eyes --per-turn 1 --per-minute 4    ... with a tighter capture budget
+    agent-eyes --allow-builtin --front-camera "MacBook Pro Camera"    dry run with the Mac's camera
     agent-eyes camera list
     agent-eyes camera capture --view desk --detail inspect --region 0.4,0.4,0.2,0.2 --out cap.jpg
     agent-eyes chat                  talk to the agent by typing (one line per turn)
@@ -27,9 +28,16 @@ def main() -> None:
 
     p = argparse.ArgumentParser(prog="agent-eyes", description="Hands-free voice and vision assistant for the workbench.")
     sub = p.add_subparsers(dest="cmd", metavar="{ui,camera,chat}")
-    ui = sub.add_parser("ui", parents=[helper], help="open the app in the browser (default)")
+    budget = argparse.ArgumentParser(add_help=False)
+    budget.add_argument("--model", default=None, help="Claude model (default: the agent's default)")
+    budget.add_argument("--per-turn", type=int, default=3, help="max captures per turn (default 3)")
+    budget.add_argument("--per-minute", type=int, default=10, help="max captures per rolling minute (default 10)")
+
+    ui = sub.add_parser("ui", parents=[helper, budget], help="start the agent and its dashboard in the browser (default)")
     ui.add_argument("--port", type=int, default=8765, help="port for the web UI (default 8765)")
-    ui.add_argument("--open", default="front,desk", help="cameras to open at startup (default front,desk)")
+    ui.add_argument("--front-camera", default="front", metavar="REF",
+                    help='camera the agent sees as "front": a role, id or name (default: the phone, role front)')
+    ui.add_argument("--open", help="cameras to open at startup (default: the front camera)")
     ui.add_argument("--no-browser", action="store_true", help="don't open the page in a browser")
 
     cam = sub.add_parser("camera", help="manual camera checks").add_subparsers(dest="camera_cmd", required=True)
@@ -40,10 +48,7 @@ def main() -> None:
     c.add_argument("--region", help="x,y,w,h normalized 0..1")
     c.add_argument("--out", default="capture.jpg")
 
-    chat = sub.add_parser("chat", parents=[helper], help="talk to the agent by typing")
-    chat.add_argument("--model", default=None, help="Claude model (default: the agent's default)")
-    chat.add_argument("--per-turn", type=int, default=3, help="max captures per turn (default 3)")
-    chat.add_argument("--per-minute", type=int, default=10, help="max captures per rolling minute (default 10)")
+    sub.add_parser("chat", parents=[helper, budget], help="talk to the agent by typing")
 
     # No subcommand (or only options) means the app.
     argv = sys.argv[1:]
@@ -52,10 +57,21 @@ def main() -> None:
     args = p.parse_args(argv)
 
     if args.cmd == "ui":
+        from datetime import datetime
+
+        from .agent import DEFAULT_MODEL, CaptureBudget
         from .web import serve
 
-        source = make_source(args, tuple(filter(None, args.open.split(","))))
-        serve(source, port=args.port, open_browser=not args.no_browser)
+        source = make_source(args, tuple(filter(None, (args.open or args.front_camera).split(","))))
+        serve(
+            source,
+            front=args.front_camera,
+            budget=CaptureBudget(per_turn=args.per_turn, per_minute=args.per_minute),
+            out_dir=REPO_ROOT / "captures" / "sessions" / f"{datetime.now():%Y%m%d-%H%M%S}",
+            model=args.model or DEFAULT_MODEL,
+            port=args.port,
+            open_browser=not args.no_browser,
+        )
     elif args.cmd == "chat":
         sys.exit(asyncio.run(chat_command(args)))
     else:
