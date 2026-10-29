@@ -4,7 +4,8 @@
             agent's captures (reason and region) and the capture budget with its controls
   /cameras  the camera page: live previews, per-camera status, manual captures and helper events
 
-The agent runs in a LiveSession on the backend's event loop. Manual captures go through the
+The agent runs in a LiveSession on the backend's event loop, with voice commands and replies read
+out (LiveVoice) in this process too, so the page can show the voice state. Manual captures go through the
 CameraSource (same detail levels as the agent); previews, status and events are proxied straight
 from the camsvc helper. Previews never open or reopen a stream, so they don't interfere with the
 helper's own stall recovery.
@@ -29,6 +30,7 @@ import httpx
 from ..agent import CaptureBudget
 from ..camera import CameraError, ContinuityCameraSource, Region
 from .live import FrontAlias, LiveSession
+from .voice import LiveVoice, VoiceOptions
 
 STATIC = Path(__file__).with_name("static")
 PAGES = {"/": "agent.html", "/cameras": "cameras.html"}
@@ -37,7 +39,8 @@ PAGES = {"/": "agent.html", "/cameras": "cameras.html"}
 class Backend:
     """Runs the async camera source and the agent on their own event loop so threaded request handlers can use them."""
 
-    def __init__(self, source: ContinuityCameraSource, front: str, budget: CaptureBudget, out_dir: Path, model: str):
+    def __init__(self, source: ContinuityCameraSource, front: str, budget: CaptureBudget, out_dir: Path, model: str,
+                 voice: VoiceOptions):
         self.source = source
         self.front = front
         """Camera reference the agent's "front" view uses (normally the role "front" itself)."""
@@ -47,8 +50,10 @@ class Backend:
         self.http = httpx.Client(base_url=source.base_url or "", timeout=10.0)
         camera = source if front == "front" else FrontAlias(source, front)
         self.session = LiveSession(camera, budget, out_dir, model=model)
-        # The agent takes a few seconds to connect; serve the page meanwhile.
+        self.session.voice = LiveVoice(self.session, voice)
+        # The agent (and voicesvc) take a few seconds to start; serve the page meanwhile.
         self.spawn(self.session.start())
+        self.spawn(self.session.voice.set(listening=voice.listening, speaking=voice.speaking))
 
     def run(self, coro):
         return asyncio.run_coroutine_threadsafe(coro, self.loop).result()
@@ -168,6 +173,11 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/session/restart":
             self.backend.spawn(self.backend.session.restart())
             self._json(200, self.backend.session_summary())
+        elif self.path == "/api/session/voice":
+            # voicesvc can take a while to start (or a mic permission prompt can be waiting): don't wait for it.
+            change = {k: bool(body[k]) for k in ("listening", "speaking") if k in body}
+            self.backend.spawn(self.backend.session.voice.set(**change))
+            self._json(200, self.backend.session_summary())
         elif self.path == "/api/session/budget":
             try:
                 self.backend.set_budget(body)
@@ -212,12 +222,13 @@ def serve(
     budget: CaptureBudget,
     out_dir: Path,
     model: str,
+    voice: VoiceOptions = VoiceOptions(),
     port: int = 8765,
     open_browser: bool = True,
 ) -> None:
     """Starts the camera source and the agent, and serves the views until Ctrl-C, kill or the terminal closes."""
     try:
-        Handler.backend = Backend(source, front, budget, out_dir, model)
+        Handler.backend = Backend(source, front, budget, out_dir, model, voice)
     except CameraError as e:
         raise SystemExit(f"error [{e.code}]: {e.message}")
     try:

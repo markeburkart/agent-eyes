@@ -1,7 +1,7 @@
 """The agent session behind the dashboard: runs EyesAgent turns and records what happens.
 
-Everything the page shows (what was said, each capture with its reason and region, turn timing
-and cost, status changes) becomes one numbered event. The page polls `events_after(seq)`.
+Everything the page shows (what was said, typed or spoken, each capture with its reason and
+region, turn timing and cost, status and voice changes) becomes one numbered event. The page polls `events_after(seq)`.
 Events also go to transcript.jsonl and capture images to the session folder, for review after
 a pilot session.
 """
@@ -18,6 +18,7 @@ from pathlib import Path
 
 from ..agent import CaptureBudget, CaptureEvent, EyesAgent, TurnResult
 from ..camera import CameraSource, Capture, Detail, Region
+from .voice import LiveVoice
 
 
 class FrontAlias:
@@ -51,6 +52,7 @@ class LiveSession:
         """starting | ready | thinking | error"""
         self.error: str | None = None
         self.cost_usd: float | None = None
+        self.voice: LiveVoice | None = None
         self._agent: EyesAgent | None = None
         self._turn: asyncio.Task | None = None
         self._turn_no = 0
@@ -71,10 +73,12 @@ class LiveSession:
             self._fail(f"agent did not start: {e}")
             return
         self._agent = agent
-        self._push("status", text=f"agent ready ({self.model})")
+        self.push("status", text=f"agent ready ({self.model})")
         self._set_state("ready")
 
     async def close(self) -> None:
+        if self.voice:
+            await self.voice.close()
         if self._turn:
             self._turn.cancel()
         if self._agent:
@@ -98,34 +102,41 @@ class LiveSession:
             except Exception:
                 pass
         self.cost_usd = None
-        self._push("status", text="new conversation")
+        self.push("status", text="new conversation")
         await self.start()
 
     # ---- turns ---------------------------------------------------------------
 
-    async def ask(self, text: str) -> None:
-        """Starts a turn in the background. Raises RuntimeError if the agent can't take one now."""
+    async def ask(self, text: str, *, voice: bool = False) -> None:
+        """Starts a turn in the background (`voice`: the request was spoken). Raises RuntimeError if the
+        agent can't take one now."""
         if self.state != "ready" or self._agent is None:
             raise RuntimeError("the agent is busy" if self.state == "thinking" else f"the agent is {self.state}")
         self._turn_no += 1
-        self._push("user", text=text, turn=self._turn_no)
+        self.push("user", text=text, turn=self._turn_no, **({"voice": True} if voice else {}))
         self._set_state("thinking")
         self._turn = asyncio.create_task(self._run_turn(self._agent, text, self._turn_no))
 
     async def interrupt(self) -> None:
         if self.state == "thinking" and self._agent:
-            self._push("status", text="stop requested")
+            self.push("status", text="stop requested")
             await self._agent.interrupt()
+        if self.voice:
+            await self.voice.hush()
 
     async def _run_turn(self, agent: EyesAgent, text: str, turn: int) -> None:
         started = time.monotonic()
+        if self.voice:
+            self.voice.turn_started()
         try:
             async for part in agent.ask(text):
                 if isinstance(part, TurnResult):
                     self.cost_usd = part.cost_usd
-                    self._push("turn", turn=turn, duration_ms=part.duration_ms, cost_usd=part.cost_usd, is_error=part.is_error)
+                    self.push("turn", turn=turn, duration_ms=part.duration_ms, cost_usd=part.cost_usd, is_error=part.is_error)
                 else:
-                    self._push("agent", text=part, turn=turn)
+                    self.push("agent", text=part, turn=turn)
+                    if self.voice:
+                        await self.voice.say(part)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -133,17 +144,19 @@ class LiveSession:
             return
         finally:
             self._turn = None
+            if self.voice:
+                self.voice.turn_ended()
         self._set_state("ready")
 
     def _on_capture(self, e: CaptureEvent) -> None:
         if e.capture is None:
-            self._push("capture", turn=self._turn_no, reason=e.reason, view=e.view, detail=e.detail, error=e.error, message=e.message)
+            self.push("capture", turn=self._turn_no, reason=e.reason, view=e.view, detail=e.detail, error=e.error, message=e.message)
             return
         cap = e.capture
         cid = f"{len(self._captures) + 1:03d}-{e.detail}"
         self._captures[cid] = (cap.mime, cap.image)
         (self.out_dir / f"{cid}.jpg").write_bytes(cap.image)
-        self._push(
+        self.push(
             "capture",
             turn=self._turn_no,
             id=cid,
@@ -174,7 +187,8 @@ class LiveSession:
 
     def summary(self) -> dict:
         return {"state": self.state, "error": self.error, "cost_usd": self.cost_usd, "model": self.model,
-                "out_dir": str(self.out_dir), "budget": self.budget.state()}
+                "out_dir": str(self.out_dir), "budget": self.budget.state(),
+                "voice": self.voice.summary() if self.voice else None}
 
     # ---- internals -----------------------------------------------------------
 
@@ -183,14 +197,14 @@ class LiveSession:
             self.error = None
         if state != self.state:
             self.state = state
-            self._push("state", state=state)
+            self.push("state", state=state)
 
     def _fail(self, message: str) -> None:
         self.error = message
-        self._push("status", text=message, error=True)
+        self.push("status", text=message, error=True)
         self._set_state("error")
 
-    def _push(self, type: str, **fields) -> None:
+    def push(self, type: str, **fields) -> None:
         with self._changed:
             event = {"seq": len(self._events) + 1, "time": datetime.now().astimezone().isoformat(timespec="milliseconds"),
                      "type": type, **fields}

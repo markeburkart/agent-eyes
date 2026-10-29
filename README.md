@@ -24,6 +24,13 @@ The dashboard shows:
   and why; click one to enlarge it
 - the capture budget: what's used this turn and in the last minute, +/- for both limits, and a
   switch to stop the agent looking at all
+- the voice state in a strip across the top, large enough to read from the bench: say "hey eyes",
+  listening, agent answering, or conversation live with the seconds left before it closes (the
+  tab title shows "● Agent Eyes: conversation live" too). Its switches turn voice commands and
+  reading replies out on and off; spoken requests show in the conversation with a 🎙
+
+`uv run agent-eyes --voice` starts with voice on (same options as `chat --voice` below, e.g.
+`--wake-word`, `--follow-up`, `--no-speech`).
 
 Each run writes `transcript.jsonl` and the capture images to `captures/sessions/<start time>/`.
 "New conversation" starts the agent over. The camera diagnostics page (`/cameras`) is still

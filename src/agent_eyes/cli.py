@@ -3,6 +3,7 @@
     agent-eyes                       start the camera, the agent and its dashboard in the browser
     agent-eyes --per-turn 1 --per-minute 4    ... with a tighter capture budget
     agent-eyes --allow-builtin --front-camera "MacBook Pro Camera"    dry run with the Mac's camera
+    agent-eyes --voice               ... hands-free; the page shows whether a voice conversation is live
     agent-eyes camera list
     agent-eyes camera capture --view desk --detail inspect --region 0.4,0.4,0.2,0.2 --out cap.jpg
     agent-eyes chat                  talk to the agent by typing (one line per turn)
@@ -18,7 +19,6 @@ import argparse
 import asyncio
 import contextlib
 import os
-import subprocess
 import sys
 import threading
 
@@ -30,10 +30,12 @@ from .voice import (
     ConversationEnded,
     ConversationOpened,
     Focus,
+    FollowUpHeard,
     Interrupted,
     VoiceError,
     VoiceHelper,
     WakeHeard,
+    chime,
     voice_commands,
 )
 from .voice import build_helper as build_voice_helper
@@ -51,12 +53,27 @@ def main() -> None:
     budget.add_argument("--per-turn", type=int, default=3, help="max captures per turn (default 3)")
     budget.add_argument("--per-minute", type=int, default=10, help="max captures per rolling minute (default 10)")
 
-    ui = sub.add_parser("ui", parents=[helper, budget], help="start the agent and its dashboard in the browser (default)")
+    voice = argparse.ArgumentParser(add_help=False)
+    voice.add_argument("--voice", action="store_true",
+                       help="start with voice commands on: wake word, then dictation (toggle with /voice or on the page)")
+    voice.add_argument("--wake-word", default=None,
+                       help=f"comma-separated wake phrases (default {','.join(DEFAULT_WAKE_WORDS)})")
+    voice.add_argument("--pause", type=float, default=1.5, help="seconds of silence that end a spoken request (default 1.5)")
+    voice.add_argument("--follow-up", type=float, default=30.0,
+                       help="seconds a voice conversation stays open for follow-ups without the wake word (default 30, 0 = off)")
+    voice.add_argument("--speech", action=argparse.BooleanOptionalAction, default=None,
+                       help="read replies out (toggle with /speech or on the page; default: on with --voice)")
+    voice.add_argument("--locale", default=None, help="speech locale, e.g. en-US (default: the system's)")
+    voice.add_argument("--voice-file", default=None, help=argparse.SUPPRESS)  # play an audio file instead of the mic (testing)
+
+    ui = sub.add_parser("ui", parents=[helper, budget, voice], help="start the agent and its dashboard in the browser (default)")
     ui.add_argument("--port", type=int, default=8765, help="port for the web UI (default 8765)")
     ui.add_argument("--front-camera", default="front", metavar="REF",
                     help='camera the agent sees as "front": a role, id or name (default: the phone, role front)')
     ui.add_argument("--open", help="cameras to open at startup (default: the front camera)")
     ui.add_argument("--no-browser", action="store_true", help="don't open the page in a browser")
+
+    sub.add_parser("chat", parents=[helper, budget, voice], help="talk to the agent by typing")
 
     cam = sub.add_parser("camera", help="manual camera checks").add_subparsers(dest="camera_cmd", required=True)
     cam.add_parser("list", parents=[helper], help="list cameras")
@@ -65,19 +82,6 @@ def main() -> None:
     c.add_argument("--detail", choices=["overview", "inspect"], default="overview")
     c.add_argument("--region", help="x,y,w,h normalized 0..1")
     c.add_argument("--out", default="capture.jpg")
-
-    chat = sub.add_parser("chat", parents=[helper, budget], help="talk to the agent by typing")
-    chat.add_argument("--voice", action="store_true",
-                      help="start with voice commands on: wake word, then dictation (toggle with /voice)")
-    chat.add_argument("--wake-word", default=None,
-                      help=f"comma-separated wake phrases (default {','.join(DEFAULT_WAKE_WORDS)})")
-    chat.add_argument("--pause", type=float, default=1.5, help="seconds of silence that end a spoken request (default 1.5)")
-    chat.add_argument("--follow-up", type=float, default=30.0,
-                      help="seconds a voice conversation stays open for follow-ups without the wake word (default 30, 0 = off)")
-    chat.add_argument("--speech", action=argparse.BooleanOptionalAction, default=None,
-                      help="read replies out (toggle with /speech; default: on with --voice)")
-    chat.add_argument("--locale", default=None, help="speech locale, e.g. en-US (default: the system's)")
-    chat.add_argument("--voice-file", default=None, help=argparse.SUPPRESS)  # play an audio file instead of the mic (testing)
 
     # No subcommand (or only options) means the app.
     argv = sys.argv[1:]
@@ -89,7 +93,7 @@ def main() -> None:
         from datetime import datetime
 
         from .agent import DEFAULT_MODEL, CaptureBudget
-        from .web import serve
+        from .web import VoiceOptions, serve
 
         source = make_source(args, tuple(filter(None, (args.open or args.front_camera).split(","))))
         serve(
@@ -98,6 +102,15 @@ def main() -> None:
             budget=CaptureBudget(per_turn=args.per_turn, per_minute=args.per_minute),
             out_dir=REPO_ROOT / "captures" / "sessions" / f"{datetime.now():%Y%m%d-%H%M%S}",
             model=args.model or DEFAULT_MODEL,
+            voice=VoiceOptions(
+                wake_words=wake_words_of(args),
+                pause=args.pause,
+                follow_up=args.follow_up,
+                locale=args.locale,
+                audio_file=args.voice_file,
+                listening=args.voice,
+                speaking=args.voice if args.speech is None else args.speech,
+            ),
             port=args.port,
             open_browser=not args.no_browser,
         )
@@ -231,11 +244,6 @@ def set_title(title: str) -> None:
         print(f"\033]0;{title}\007", end="", flush=True)
 
 
-def chime(name: str) -> None:
-    """Plays a short system sound without waiting for it: the user is looking at the bench, not the screen."""
-    subprocess.Popen(["afplay", f"/System/Library/Sounds/{name}.aiff"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
 def wake_words_of(args: argparse.Namespace) -> tuple[str, ...]:
     return tuple(w.strip() for w in args.wake_word.split(",") if w.strip()) if args.wake_word else DEFAULT_WAKE_WORDS
 
@@ -329,6 +337,8 @@ async def listen(controls: VoiceControls, voice: VoiceHelper, requests: asyncio.
             if isinstance(event, WakeHeard):
                 chime("Tink")
                 print("  [listening ...]", flush=True)
+            elif isinstance(event, FollowUpHeard):
+                continue
             elif isinstance(event, Command):
                 if not controls.listening:
                     continue  # cut off by /voice off
