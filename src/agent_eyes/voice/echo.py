@@ -12,12 +12,12 @@ import time
 from collections.abc import Callable
 
 # Words the speech recognizer and the reply text may spell differently.
-_SAME = {"okay": "ok", "o.k": "ok"}
+_SAME: dict[str, str] = {"okay": "ok", "o.k": "ok"}
 
 
 def spoken_words(text: str) -> list[str]:
-    words = re.findall(r"[a-z0-9']+(?:\.[a-z])?", text.lower())
-    return [_SAME.get(w, w) for w in words]
+    words: list[str] = re.findall(r"[a-z0-9']+(?:\.[a-z])?", text.lower())
+    return [_SAME.get(w) or w for w in words]
 
 
 class Echo:
