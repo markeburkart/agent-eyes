@@ -39,6 +39,35 @@
   button.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
   button:disabled { opacity: .45; cursor: default; }
 
+  /* voice: readable from the bench */
+  #voice { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); transition: background .2s; }
+  #voice .dot { flex: none; width: 22px; height: 22px; border-radius: 50%; background: var(--line); }
+  #voice .vtext { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  #voice .vtext b { font-size: 30px; line-height: 1.2; white-space: nowrap; }
+  #voice .vtext span { font-size: 15px; color: var(--muted); }
+  #voice .vleft { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; min-width: 160px; }
+  #voice .vleft output { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.2; }
+  #voice .vleft .meter { width: 160px; }
+  #voice .vleft[hidden] { display: none; }
+  #voice .vleft .meter i { transition: width .25s linear; }
+  #voice .switches { flex: none; display: flex; flex-direction: column; gap: 2px; }
+  #voice.off, #voice.starting { padding: 6px 16px; }
+  #voice.off .vtext b, #voice.starting .vtext b { font-size: 15px; }
+  #voice.off .dot, #voice.starting .dot { width: 12px; height: 12px; }
+  #voice.idle .dot { background: var(--muted); }
+  #voice.dictating { background: var(--accent-bg); }
+  #voice.dictating .dot { background: var(--accent); animation: pulse 1s ease-in-out infinite; }
+  #voice.answering { background: var(--accent-bg); }
+  #voice.answering .dot { background: var(--accent); animation: pulse 2s ease-in-out infinite; }
+  #voice.live { background: var(--ok-bg); }
+  #voice.live .vtext b, #voice.live .vleft output { color: var(--ok); }
+  #voice.live .dot { background: var(--ok); }
+  #voice.live .meter i { background: var(--ok); }
+  #voice.live.ending .vleft output { color: var(--warn); }
+  #voice.live.ending .meter i { background: var(--warn); }
+  @keyframes pulse { 50% { opacity: .35; transform: scale(.8); } }
+  .msg.user.voice::before { content: "🎙 "; }
+
   /* live view */
   #live { flex: 1; min-height: 240px; display: flex; flex-direction: column; }
   .view { position: relative; flex: 1; min-height: 0; margin: 10px; background: #000; border-radius: 6px; overflow: hidden; }
@@ -132,6 +161,15 @@
   <a href="/cameras" target="_blank">camera diagnostics</a>
   <button id="restart" title="Start over: the agent forgets this conversation">New conversation</button>
 </header>
+<section id="voice" class="off">
+  <span class="dot"></span>
+  <div class="vtext"><b id="voiceTitle">Voice off</b><span id="voiceHint"></span></div>
+  <div class="vleft" hidden><output id="voiceLeft"></output><div class="meter"><i></i></div></div>
+  <div class="switches">
+    <label class="toggle"><input type="checkbox" id="voiceOn"> voice commands</label>
+    <label class="toggle"><input type="checkbox" id="speechOn"> read replies out</label>
+  </div>
+</section>
 <main>
   <div class="col">
     <div id="live" class="panel">
@@ -211,7 +249,56 @@ function applySession(s) {
   $("#outDir").title = `transcript.jsonl and captures are saved in ${s.out_dir}`;
   $("#thinking")?.toggleAttribute("hidden", s.state !== "thinking");
   applyBudget(s.budget);
+  applyVoice(s.voice);
 }
+
+// ---- voice state --------------------------------------------------------------
+
+const voiceEl = $("#voice"), voiceLeftEl = $("#voiceLeft");
+let voice = null, liveUntil = null, voicePending = false;
+
+function applyVoice(v) {
+  voice = v;
+  if (!v) { voiceEl.hidden = true; return; }
+  const wake = `"${v.wake_word}"`;
+  const [title, hint] = {
+    off: ["Voice off", "switch voice commands on to talk hands-free"],
+    starting: ["Voice starting…", "the first start may download the speech model or ask for the microphone"],
+    idle: [`Say ${wake}`, "then your request"],
+    dictating: ["Listening…", "pause when you're done; end with \"never mind\" to drop it"],
+    answering: ["Agent answering…", v.live ? "conversation stays live; say \"stop\" to cut a readout short" : "say \"stop\" to cut a readout short"],
+    live: ["Conversation live", "follow up without the wake word · say \"that's all\" to close"],
+  }[v.state];
+  voiceEl.className = v.state;
+  $("#voiceTitle").textContent = title;
+  $("#voiceHint").textContent = v.error || hint;
+  liveUntil = v.state === "live" && v.left_s != null ? performance.now() + v.left_s * 1000 : null;
+  tickVoice();
+  document.title = { live: "● Agent Eyes: conversation live", dictating: "● Agent Eyes: listening",
+                     answering: "Agent Eyes: answering" }[v.state] || "Agent Eyes";
+  if (!voicePending && v.state !== "starting") { $("#voiceOn").checked = v.listening; $("#speechOn").checked = v.speaking; }
+}
+
+// Counts down between polls.
+function tickVoice() {
+  const box = $(".vleft", voiceEl);
+  box.hidden = liveUntil == null;
+  if (liveUntil == null) return;
+  const left = Math.max(0, (liveUntil - performance.now()) / 1000);
+  voiceLeftEl.textContent = `${Math.ceil(left)} s left`;
+  $("i", box).style.width = `${voice.follow_up_s ? Math.min(100, 100 * left / voice.follow_up_s) : 0}%`;
+  voiceEl.classList.toggle("ending", left <= 10);
+}
+setInterval(tickVoice, 250);
+
+async function setVoice(change) {
+  voicePending = true;
+  try { applySession(await post("/api/session/voice", change)); }
+  catch (e) { addNote(`voice change failed: ${e.message}`, "bad center"); }
+  finally { voicePending = false; }
+}
+$("#voiceOn").onchange = e => setVoice({ listening: e.target.checked });
+$("#speechOn").onchange = e => setVoice({ speaking: e.target.checked });
 
 function applyBudget(b) {
   const meter = (id, used, max) => {
@@ -266,7 +353,7 @@ function addNote(text, cls = "") { return append(el("div", "note " + cls, text))
 function handle(e, live) {
   switch (e.type) {
     case "user":
-      append(el("div", "msg user", e.text));
+      append(el("div", "msg user" + (e.voice ? " voice" : ""), e.text)).title = e.voice ? "spoken" : "typed";
       ensureThinking();
       scrollDown();
       break;
@@ -288,6 +375,9 @@ function handle(e, live) {
     }
     case "status":
       addNote(`${fmtTime(e.time)} · ${e.text}`, "center" + (e.error ? " bad" : ""));
+      break;
+    case "voice":
+      if (e.text) addNote(`${fmtTime(e.time)} · ${e.text}`, "center");
       break;
   }
 }

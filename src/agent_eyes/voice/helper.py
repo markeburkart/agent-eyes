@@ -41,6 +41,11 @@ def build_helper() -> None:
         raise VoiceError("helper_build_failed", f"{' '.join(cmd)} failed:\n{result.stdout}{result.stderr}")
 
 
+def chime(name: str) -> None:
+    """Plays a short system sound without waiting for it: the user is looking at the bench, not the screen."""
+    subprocess.Popen(["afplay", f"/System/Library/Sounds/{name}.aiff"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 class VoiceHelper:
     """Spawns voicesvc, reads what it hears and speaks for the assistant. Use as an async context manager.
 

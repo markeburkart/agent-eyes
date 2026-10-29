@@ -7,12 +7,13 @@ from .commands import (
     ConversationEnded,
     ConversationOpened,
     Focus,
+    FollowUpHeard,
     Interrupted,
     VoiceEvent,
     WakeHeard,
     voice_commands,
 )
-from .helper import Transcript, VoiceError, VoiceHelper, build_helper
+from .helper import Transcript, VoiceError, VoiceHelper, build_helper, chime
 
 __all__ = [
     "DEFAULT_WAKE_WORDS",
@@ -21,6 +22,7 @@ __all__ = [
     "ConversationEnded",
     "ConversationOpened",
     "Focus",
+    "FollowUpHeard",
     "Interrupted",
     "Transcript",
     "VoiceError",
@@ -28,5 +30,6 @@ __all__ = [
     "VoiceHelper",
     "WakeHeard",
     "build_helper",
+    "chime",
     "voice_commands",
 ]

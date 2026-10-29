@@ -72,10 +72,22 @@ class Focus:
             self._open = False
         return self._open
 
+    @property
+    def left(self) -> float | None:
+        """Seconds until the open conversation times out (all of them while busy), or None if it's closed."""
+        if not self.active:
+            return None
+        return self.seconds if self.busy else max(0.0, self._until - self._clock())
+
 
 @dataclass(frozen=True)
 class WakeHeard:
     """The wake word was heard; dictation has started."""
+
+
+@dataclass(frozen=True)
+class FollowUpHeard:
+    """Speech in a live conversation (no wake word needed); dictation has started."""
 
 
 @dataclass(frozen=True)
@@ -108,7 +120,7 @@ class Interrupted:
     word: str
 
 
-VoiceEvent = WakeHeard | Command | Cancelled | ConversationOpened | ConversationEnded | Interrupted
+VoiceEvent = WakeHeard | FollowUpHeard | Command | Cancelled | ConversationOpened | ConversationEnded | Interrupted
 
 
 def _words(text: str) -> list[re.Match[str]]:
@@ -157,7 +169,8 @@ async def voice_commands(
     finalize_wait: float = 2.0,
 ) -> AsyncIterator[VoiceEvent]:
     """Yields WakeHeard when the wake word is spoken, then a Command once the speaker pauses for
-    `pause` seconds, or Cancelled. Speech without the wake word is ignored unless `focus` is active;
+    `pause` seconds, or Cancelled. Speech without the wake word is ignored unless `focus` is active
+    (then it yields FollowUpHeard and dictation starts);
     yields ConversationOpened and ConversationEnded as focus comes and goes. While `source.echo` is
     active only interrupt words count; yields Interrupted after stopping the readout."""
     focus = focus or Focus(0)
@@ -255,5 +268,6 @@ async def voice_commands(
                 yield WakeHeard()
             elif focus.active and (settled + volatile).strip(_FILLER):
                 dictating = True
+                yield FollowUpHeard()
             elif t.final:
                 settled = ""  # chatter without the wake word
