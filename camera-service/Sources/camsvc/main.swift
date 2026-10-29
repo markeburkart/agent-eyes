@@ -3,10 +3,12 @@
 // Keeps video streams open with a short ring buffer, returns the sharpest recent frame
 // (optionally cropped to a region) as JPEG over a loopback HTTP API.
 //
-// Usage: camsvc [--port N] [--open front,desk] [--allow-builtin]
+// Usage: camsvc [--port N] [--open front,desk] [--allow-builtin] [--exit-on-eof]
 //   --port N         listen on 127.0.0.1:N (default 0 = pick a free port)
 //   --open ROLES     comma-separated cameras to open at startup (roles, IDs or names)
 //   --allow-builtin  also expose the Mac's own cameras (hidden by default)
+//   --exit-on-eof    exit when stdin closes, so a spawned helper never outlives its parent
+//                    (even one that was killed or crashed)
 //
 // On startup prints one JSON line to stdout: {"event":"ready","port":N}. Logs go to stderr.
 //
@@ -33,6 +35,7 @@ func emit(_ obj: [String: Any]) {
 var port: UInt16 = 0
 var openAtStart: [String] = []
 var allowBuiltIn = false
+var exitOnEOF = false
 do {
     var it = CommandLine.arguments.dropFirst().makeIterator()
     while let a = it.next() {
@@ -40,8 +43,17 @@ do {
         case "--port": port = UInt16(it.next() ?? "") ?? 0
         case "--open": openAtStart = (it.next() ?? "").split(separator: ",").map(String.init)
         case "--allow-builtin": allowBuiltIn = true
+        case "--exit-on-eof": exitOnEOF = true
         default: log("unknown argument \(a)"); exit(64)
         }
+    }
+}
+
+if exitOnEOF {
+    Thread.detachNewThread {
+        while !FileHandle.standardInput.availableData.isEmpty {}
+        log("stdin closed; exiting")
+        exit(0)
     }
 }
 
