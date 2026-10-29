@@ -132,13 +132,16 @@ class ContinuityCameraSource:
                 "helper_missing",
                 f"camsvc not found at {self._binary}. Build it with: swift build -c release --package-path camera-service",
             )
-        args = [str(self._binary), "--port", "0"]
+        # The helper exits when its stdin closes, which happens however we exit (even kill -9).
+        args = [str(self._binary), "--port", "0", "--exit-on-eof"]
         if self._open_at_start:
             args += ["--open", ",".join(self._open_at_start)]
         if self._allow_builtin:
             args.append("--allow-builtin")
         # Helper logs go straight to our stderr; stdout carries the one-line ready event.
-        self._proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=sys.stderr)
+        self._proc = await asyncio.create_subprocess_exec(
+            *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=sys.stderr,
+        )
         assert self._proc.stdout
         try:
             line = await asyncio.wait_for(self._proc.stdout.readline(), self._startup_timeout)

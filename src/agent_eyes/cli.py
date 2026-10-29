@@ -19,6 +19,7 @@ import argparse
 import asyncio
 import contextlib
 import os
+import signal
 import sys
 import threading
 
@@ -115,6 +116,9 @@ def main() -> None:
             open_browser=not args.no_browser,
         )
     elif args.cmd == "chat":
+        # Treat kill and a closed terminal like Ctrl-C so the agent and helpers shut down cleanly.
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, signal.default_int_handler)
         try:
             sys.exit(asyncio.run(chat_command(args)))
         except KeyboardInterrupt:
