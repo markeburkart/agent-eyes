@@ -50,6 +50,8 @@
   #voice .vleft .meter { width: 160px; }
   #voice .vleft[hidden] { display: none; }
   #voice .vleft .meter i { transition: width .25s linear; }
+  #voice #endTalk { flex: none; font-size: 18px; font-weight: 600; padding: 10px 20px; border-radius: 8px; }
+  #voice #endTalk[hidden] { display: none; }
   #voice .switches { flex: none; display: flex; flex-direction: column; gap: 2px; }
   #voice.off, #voice.starting { padding: 6px 16px; }
   #voice.off .vtext b, #voice.starting .vtext b { font-size: 15px; }
@@ -165,6 +167,7 @@
   <span class="dot"></span>
   <div class="vtext"><b id="voiceTitle">Voice off</b><span id="voiceHint"></span></div>
   <div class="vleft" hidden><output id="voiceLeft"></output><div class="meter"><i></i></div></div>
+  <button id="endTalk" hidden title="Close the conversation: the wake word is needed again (the agent keeps its context)">End conversation</button>
   <div class="switches">
     <label class="toggle"><input type="checkbox" id="voiceOn"> voice commands</label>
     <label class="toggle"><input type="checkbox" id="speechOn"> read replies out</label>
@@ -267,11 +270,12 @@ function applyVoice(v) {
     idle: [`Say ${wake}`, "then your request"],
     dictating: ["Listening…", "pause when you're done; end with \"never mind\" to drop it"],
     answering: ["Agent answering…", v.live ? "conversation stays live; say \"stop\" to cut a readout short" : "say \"stop\" to cut a readout short"],
-    live: ["Conversation live", "follow up without the wake word · say \"that's all\" to close"],
+    live: ["Conversation live", "follow up without the wake word · say \"ok thanks\" to close"],
   }[v.state];
   voiceEl.className = v.state;
   $("#voiceTitle").textContent = title;
   $("#voiceHint").textContent = v.error || hint;
+  $("#endTalk").hidden = !(v.state === "live" || v.state === "dictating" || (v.state === "answering" && v.live));
   liveUntil = v.state === "live" && v.left_s != null ? performance.now() + v.left_s * 1000 : null;
   tickVoice();
   document.title = { live: "● Agent Eyes: conversation live", dictating: "● Agent Eyes: listening",
@@ -299,6 +303,10 @@ async function setVoice(change) {
 }
 $("#voiceOn").onchange = e => setVoice({ listening: e.target.checked });
 $("#speechOn").onchange = e => setVoice({ speaking: e.target.checked });
+$("#endTalk").onclick = async () => {
+  try { applySession(await post("/api/session/voice/end")); }
+  catch (e) { addNote(`ending the conversation failed: ${e.message}`, "bad center"); }
+};
 
 function applyBudget(b) {
   const meter = (id, used, max) => {

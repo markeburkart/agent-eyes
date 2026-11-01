@@ -178,6 +178,9 @@ class Handler(BaseHTTPRequestHandler):
             change = {k: bool(body[k]) for k in ("listening", "speaking") if k in body}
             self.backend.spawn(self.backend.session.voice.set(**change))
             self._json(200, self.backend.session_summary())
+        elif self.path == "/api/session/voice/end":
+            self.backend.call(self.backend.session.voice.end_conversation)
+            self._json(200, self.backend.session_summary())
         elif self.path == "/api/session/budget":
             try:
                 self.backend.set_budget(body)
