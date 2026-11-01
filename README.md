@@ -29,6 +29,9 @@ The dashboard shows:
   tab title shows "● Agent Eyes: conversation live" too). "End conversation" closes it (or drops a
   request being dictated), like saying "ok thanks". Its switches turn voice commands and
   reading replies out on and off; spoken requests show in the conversation with a 🎙
+- New conversation (the agent forgets everything said so far; or say "hey eyes, new
+  conversation", "start over" or "clear context") and Shut down (stops the agent, voice and
+  camera helper and exits, like Ctrl-C)
 
 `uv run agent-eyes --voice` starts with voice on (same options as `chat --voice` below, e.g.
 `--wake-word`, `--follow-up`, `--no-speech`).

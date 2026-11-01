@@ -12,6 +12,9 @@ answering). "Ok thanks", "that's all" or "stop listening" closes it straight awa
 Replies are read out with the mic still on. While the assistant is speaking, dictation pauses
 and its own words are filtered out of what the mic hears (`Echo`); saying "stop" or "ok" cuts
 the readout short, and "ok thanks" (or any other closing phrase) also closes the conversation.
+
+With `clear_phrases` (e.g. CLEAR_PHRASES), a request that is nothing but one of them ("hey eyes,
+new conversation") yields ClearContext instead of a Command.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ DEFAULT_WAKE_WORDS = ("hey eyes", "hey ice", "hi eyes")
 CANCEL_PHRASES = ("never mind", "nevermind", "cancel")
 END_PHRASES = ("that's all", "that is all", "stop listening", "goodbye",
                "ok thanks", "okay thanks", "ok thank you", "okay thank you")
+CLEAR_PHRASES = ("new conversation", "start over", "clear context")
 INTERRUPT_WORDS = ("stop", "ok", "skip")
 _FILLER = " ,.;:!?-"
 _HESITATIONS = {"um", "uh", "hmm", "mm", "ah", "er", "oh"}
@@ -106,6 +110,11 @@ class Command:
 
 
 @dataclass(frozen=True)
+class ClearContext:
+    """The user asked to start over: the agent should forget the conversation so far."""
+
+
+@dataclass(frozen=True)
 class Cancelled:
     reason: str
     text: str = ""
@@ -130,7 +139,7 @@ class Interrupted:
     word: str
 
 
-VoiceEvent = WakeHeard | FollowUpHeard | Command | Cancelled | ConversationOpened | ConversationEnded | Interrupted
+VoiceEvent = WakeHeard | FollowUpHeard | Command | ClearContext | Cancelled | ConversationOpened | ConversationEnded | Interrupted
 
 
 def _words(text: str) -> list[re.Match[str]]:
@@ -164,6 +173,11 @@ def is_end(command: str) -> bool:
     return _ends_with(command, END_PHRASES)
 
 
+def is_clear(command: str, phrases: tuple[str, ...] = CLEAR_PHRASES) -> bool:
+    """The whole request is a clear phrase ("let's start over with pin five" is a request)."""
+    return " ".join(m.group() for m in _words(command)) in phrases
+
+
 def is_hesitation(text: str) -> bool:
     """Nothing but "um", "uh" and the like: not worth sending to the agent."""
     return all(m.group() in _HESITATIONS for m in _words(text))
@@ -174,6 +188,7 @@ async def voice_commands(
     wake_words: tuple[str, ...] = DEFAULT_WAKE_WORDS,
     *,
     focus: Focus | None = None,
+    clear_phrases: tuple[str, ...] = (),
     pause: float = 1.5,
     wait_for_command: float = 8.0,
     finalize_wait: float = 2.0,
@@ -181,7 +196,8 @@ async def voice_commands(
     """Yields WakeHeard when the wake word is spoken, then a Command once the speaker pauses for
     `pause` seconds, or Cancelled. Speech without the wake word is ignored unless `focus` is active
     (then it yields FollowUpHeard and dictation starts);
-    yields ConversationOpened and ConversationEnded as focus comes and goes. While `source.echo` is
+    yields ConversationOpened and ConversationEnded as focus comes and goes, and ClearContext for a
+    request that is one of `clear_phrases`. While `source.echo` is
     active only interrupt words count; yields Interrupted after stopping the readout."""
     focus = focus or Focus(0)
     settled = ""  # final transcript text since the last command
@@ -255,6 +271,9 @@ async def voice_commands(
             elif is_cancel(command):
                 focus.extend()
                 yield Cancelled("cancelled", command)
+            elif is_clear(command, clear_phrases):
+                focus.start()
+                yield ClearContext()
             elif not is_hesitation(command):
                 focus.start()
                 yield Command(command)

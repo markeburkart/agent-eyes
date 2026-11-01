@@ -4,6 +4,8 @@
             agent's captures (reason and region) and the capture budget with its controls
   /cameras  the camera page: live previews, per-camera status, manual captures and helper events
 
+POST /api/shutdown stops everything, like Ctrl-C.
+
 The agent runs in a LiveSession on the backend's event loop, with voice commands and replies read
 out (LiveVoice) in this process too, so the page can show the voice state. Manual captures go through the
 CameraSource (same detail levels as the agent); previews, status and events are proxied straight
@@ -181,6 +183,11 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/session/voice/end":
             self.backend.call(self.backend.session.voice.end_conversation)
             self._json(200, self.backend.session_summary())
+        elif self.path == "/api/shutdown":
+            # Like Ctrl-C: serve() then stops the agent, voice and camera, and the process exits.
+            print("shutting down (from the dashboard)", flush=True)
+            self._json(200, {"ok": True})
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
         elif self.path == "/api/session/budget":
             try:
                 self.backend.set_budget(body)
