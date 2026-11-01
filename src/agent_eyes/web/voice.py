@@ -3,7 +3,8 @@
 Spoken requests go to the LiveSession like typed ones. The page shows the voice state from
 `summary()` big enough to read from the bench: off, starting, idle (waiting for the wake word),
 dictating, answering (the agent is working on a request or reading its reply out) or live
-(follow-ups need no wake word), with the seconds left before a live conversation closes. Each
+(follow-ups need no wake word), with the seconds left before a live conversation closes, and a
+button to close it (`end_conversation()`, like saying "ok thanks"). Each
 change is also a session event, so the page's long poll picks it up at once. The same sounds as
 in the terminal chat play.
 """
@@ -146,6 +147,14 @@ class LiveVoice:
         self.focus.busy = False
         self.focus.extend()
 
+    def end_conversation(self) -> None:
+        """Closes a live conversation and drops a request being dictated, like saying "ok thanks".
+        voice_commands stops a readout and yields ConversationEnded."""
+        if self.listening and (self.focus.active or self.dictating):
+            self.focus.close("closed from the dashboard")
+            self.dictating = False
+            self.session.push("voice")
+
     async def say(self, text: str) -> None:
         if self.speaking and self._helper:
             await self._helper.speak(text)
@@ -185,7 +194,7 @@ class LiveVoice:
                         push("status", text=f'not sent ({e}), please repeat: "{event.text}"', error=True)
                 elif isinstance(event, ConversationOpened):
                     push("voice", text=f"conversation live: follow up without the wake word; closes after "
-                                       f"{self.focus.seconds:g} s of quiet or when you say \"that's all\"")
+                                       f"{self.focus.seconds:g} s of quiet or when you say \"ok thanks\" or \"that's all\"")
                 elif isinstance(event, Interrupted):
                     push("voice", text=f'readout stopped: you said "{event.word}"')
                 elif isinstance(event, ConversationEnded):

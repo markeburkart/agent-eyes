@@ -6,11 +6,12 @@ ends when you pause. Saying the wake word alone and then the request also works.
 
 After a request the conversation stays open: follow-ups ("like this?") need no wake word until
 nobody has said anything for a while (`Focus`, 30 s by default, held while the agent is
-answering). "That's all" or "stop listening" closes it straight away.
+answering). "Ok thanks", "that's all" or "stop listening" closes it straight away, as does
+`Focus.close()` (e.g. a button).
 
 Replies are read out with the mic still on. While the assistant is speaking, dictation pauses
 and its own words are filtered out of what the mic hears (`Echo`); saying "stop" or "ok" cuts
-the readout short.
+the readout short, and "ok thanks" (or any other closing phrase) also closes the conversation.
 """
 
 from __future__ import annotations
@@ -27,7 +28,8 @@ from .helper import Transcript
 
 DEFAULT_WAKE_WORDS = ("hey eyes", "hey ice", "hi eyes")
 CANCEL_PHRASES = ("never mind", "nevermind", "cancel")
-END_PHRASES = ("that's all", "that is all", "stop listening", "goodbye")
+END_PHRASES = ("that's all", "that is all", "stop listening", "goodbye",
+               "ok thanks", "okay thanks", "ok thank you", "okay thank you")
 INTERRUPT_WORDS = ("stop", "ok", "skip")
 _FILLER = " ,.;:!?-"
 _HESITATIONS = {"um", "uh", "hmm", "mm", "ah", "er", "oh"}
@@ -45,7 +47,7 @@ class Focus:
     """Whether the conversation is open, so speech without the wake word counts as a request.
 
     `start()` opens it (after each spoken request); it closes `seconds` after the last `start()`
-    or `extend()`, or with `end()`. While `busy` (the agent is answering) it doesn't time out."""
+    or `extend()`, or with `end()` or `close()`. While `busy` (the agent is answering) it doesn't time out."""
 
     def __init__(self, seconds: float = 30.0, clock: Callable[[], float] = time.monotonic):
         self.seconds = seconds
@@ -53,6 +55,8 @@ class Focus:
         self._clock = clock
         self._open = False
         self._until = -math.inf
+        self.closing: str | None = None
+        """Why `close()` was called, until voice_commands has acted on it."""
 
     def start(self) -> None:
         self._open = True
@@ -65,6 +69,12 @@ class Focus:
 
     def end(self) -> None:
         self._open = False
+
+    def close(self, reason: str) -> None:
+        """Closes the conversation from outside voice_commands (e.g. a button), as if the closing
+        phrase had been said: it drops a request being dictated, stops a readout and yields ConversationEnded."""
+        self._open = False
+        self.closing = reason
 
     @property
     def active(self) -> bool:
@@ -181,6 +191,7 @@ async def voice_commands(
     was_focused = False
     in_echo = False  # the assistant is (or just was) speaking: listen only for interrupt words
     interrupted = False
+    closed = False  # a closing phrase was heard during this readout
     echo = source.echo
 
     def request_text() -> str:
@@ -191,7 +202,15 @@ async def voice_commands(
     while True:
         if in_echo and not echo.active:
             # The readout (and its delayed transcript) is over; start listening afresh.
-            settled, volatile, in_echo, interrupted = "", "", False, False
+            settled, volatile, in_echo, interrupted, closed = "", "", False, False, False
+        if focus.closing is not None:
+            reason, focus.closing = focus.closing, None
+            if echo.speaking:
+                await source.stop_speaking()
+                interrupted = True
+            if was_focused or dictating:
+                yield ConversationEnded(reason)
+            settled, volatile, dictating, finalize_sent, was_focused = "", "", False, False, False
         if in_echo:
             focus.extend()  # the follow-up window starts once the reply has been read out
         if not dictating:
@@ -214,6 +233,8 @@ async def voice_commands(
             timeout = pause
 
         t = await source.next(timeout)
+        if focus.closing is not None:
+            continue  # closed while waiting: drop whatever was heard
         if t is None:
             if not dictating or in_echo or echo.active:
                 continue
@@ -253,9 +274,23 @@ async def voice_commands(
             volatile = t.text
             finalize_sent = False
         if in_echo:
-            said = set(echo.leftover(settled + volatile))
+            left = echo.leftover(settled + volatile)
+            said = set(left)
             if not said:
                 echo.heard_echo()
+            if not closed and is_end(" ".join(left)):
+                # E.g. "ok thanks": the "ok" may already have stopped the readout; now close too.
+                closed = True
+                if not interrupted and echo.speaking:
+                    interrupted = True
+                    await source.stop_speaking()
+                    if not was_focused:
+                        yield Interrupted(" ".join(left))
+                if was_focused:
+                    yield ConversationEnded("you closed it")
+                focus.end()
+                was_focused = False
+                continue
             if not interrupted and echo.speaking:
                 if word := next((w for w in INTERRUPT_WORDS if w in said), None):
                     interrupted = True

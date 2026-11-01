@@ -26,7 +26,8 @@ The dashboard shows:
   switch to stop the agent looking at all
 - the voice state in a strip across the top, large enough to read from the bench: say "hey eyes",
   listening, agent answering, or conversation live with the seconds left before it closes (the
-  tab title shows "● Agent Eyes: conversation live" too). Its switches turn voice commands and
+  tab title shows "● Agent Eyes: conversation live" too). "End conversation" closes it (or drops a
+  request being dictated), like saying "ok thanks". Its switches turn voice commands and
   reading replies out on and off; spoken requests show in the conversation with a 🎙
 
 `uv run agent-eyes --voice` starts with voice on (same options as `chat --voice` below, e.g.
@@ -66,13 +67,14 @@ model and asks for microphone access for your terminal app.
 
 After a spoken request the conversation stays live: follow-ups ("like this?") need no wake word.
 It closes after 30 s without anyone speaking (the agent's own thinking time doesn't count), or
-when you say "that's all". While it is live the terminal tab title shows
-"● agent-eyes: conversation live", and a sound plays when it closes.
+when you say "ok thanks" (or "that's all"). While it is live the terminal tab title shows
+"● agent-eyes: conversation live", and a sound plays when it closes. Closing only means the
+wake word is needed again; the agent keeps the conversation's context.
 
 Replies are read out with the Mac's voice (`--no-speech` for text only; `--speech` without
 `--voice` to hear replies to typed requests). The mic stays on while the agent speaks, but its
 own words are filtered out of what the mic hears, so requests pause during the readout; say
-"stop" or "ok" to cut it short.
+"stop" or "ok" to cut it short, or "ok thanks" to cut it short and close the conversation.
 
 Both can be switched during a chat by typing `/voice` (voice commands; off closes the mic) and
 `/speech` (reading replies out; off also stops a readout in progress), or `/voice on|off`,

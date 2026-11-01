@@ -352,7 +352,7 @@ async def listen(controls: VoiceControls, voice: VoiceHelper, requests: asyncio.
             elif isinstance(event, ConversationOpened):
                 set_title("● agent-eyes: conversation live")
                 print(f"  [conversation live: follow up without the wake word; closes after {focus.seconds:g}s of quiet "
-                      "or when you say \"that's all\"]", flush=True)
+                      "or when you say \"ok thanks\" or \"that's all\"]", flush=True)
             elif isinstance(event, Interrupted):
                 print(f'  [readout stopped: you said "{event.word}"]', flush=True)
             elif isinstance(event, ConversationEnded):
