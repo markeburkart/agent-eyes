@@ -1,4 +1,5 @@
-"""Closing a voice conversation: the closing phrases ("ok thanks" etc.) and Focus.close().
+"""Closing a voice conversation (the closing phrases, "ok thanks" etc., and Focus.close()) and
+clearing the agent's context ("new conversation").
 
 Run with: uv run python -m unittest discover tests
 """
@@ -7,12 +8,16 @@ import unittest
 from collections.abc import Callable
 
 from agent_eyes.voice.commands import (
+    CLEAR_PHRASES,
+    ClearContext,
     Command,
     ConversationEnded,
     ConversationOpened,
     Focus,
     FollowUpHeard,
     Interrupted,
+    WakeHeard,
+    is_clear,
     is_end,
     voice_commands,
 )
@@ -62,10 +67,10 @@ class FakeSource:
             self.echo.done()
 
 
-async def run(source: FakeSource, focus: Focus) -> list:
+async def run(source: FakeSource, focus: Focus, clear_phrases: tuple[str, ...] = ()) -> list:
     events = []
     try:
-        async for event in voice_commands(source, focus=focus):
+        async for event in voice_commands(source, focus=focus, clear_phrases=clear_phrases):
             events.append(event)
     except Done:
         pass
@@ -91,6 +96,18 @@ class IsEndTest(unittest.TestCase):
                      "is the red wire on pin five thanks", "check it again, thanks"):
             with self.subTest(said=said):
                 self.assertFalse(is_end(said))
+
+
+class IsClearTest(unittest.TestCase):
+    def test_clear_phrases(self):
+        for said in ("new conversation", "New conversation.", "start over", "clear context"):
+            with self.subTest(said=said):
+                self.assertTrue(is_clear(said))
+
+    def test_request_mentioning_a_clear_phrase_is_not_one(self):
+        for said in ("let's start over with pin five", "is this a new conversation", "start over the soldering"):
+            with self.subTest(said=said):
+                self.assertFalse(is_clear(said))
 
 
 class ConversationTest(unittest.IsolatedAsyncioTestCase):
@@ -162,6 +179,16 @@ class ConversationTest(unittest.IsolatedAsyncioTestCase):
                                          lambda: self.focus.close("button")] + [None] * 2)
         events = await run(source, self.focus)
         self.assertEqual(events, [ConversationOpened(), FollowUpHeard(), ConversationEnded("button")])
+
+    async def test_new_conversation_after_wake_word(self):
+        self.focus.end()
+        events = await run(FakeSource(self.clock, [heard("hey eyes, new conversation"), None]), self.focus, CLEAR_PHRASES)
+        self.assertEqual(events, [WakeHeard(), ClearContext(), ConversationOpened()])
+        self.assertTrue(self.focus.active)
+
+    async def test_new_conversation_is_a_request_without_clear_phrases(self):
+        events = await run(FakeSource(self.clock, [heard("new conversation"), None]), self.focus)
+        self.assertEqual(events, [ConversationOpened(), FollowUpHeard(), Command("new conversation")])
 
 
 if __name__ == "__main__":

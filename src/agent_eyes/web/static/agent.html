@@ -67,6 +67,8 @@
   #voice.live .meter i { background: var(--ok); }
   #voice.live.ending .vleft output { color: var(--warn); }
   #voice.live.ending .meter i { background: var(--warn); }
+  .stopped { margin: auto; display: flex; flex-direction: column; align-items: center; gap: 8px; color: var(--muted); }
+  .stopped b { font-size: 30px; color: var(--ink); }
   @keyframes pulse { 50% { opacity: .35; transform: scale(.8); } }
   .msg.user.voice::before { content: "🎙 "; }
 
@@ -161,7 +163,8 @@
   <span id="cost" class="badge" title="Total for this conversation, as the SDK reports it">$ —</span>
   <span class="spacer"></span>
   <a href="/cameras" target="_blank">camera diagnostics</a>
-  <button id="restart" title="Start over: the agent forgets this conversation">New conversation</button>
+  <button id="restart" title="Start over: the agent forgets this conversation (or say &quot;new conversation&quot;)">New conversation</button>
+  <button id="shutdown" class="danger" title="Stop Agent Eyes: the agent, voice and camera helper (like Ctrl-C in the terminal)">Shut down</button>
 </header>
 <section id="voice" class="off">
   <span class="dot"></span>
@@ -598,6 +601,13 @@ $("#ask").onsubmit = async ev => {
 stopBtn.onclick = () => post("/api/session/stop").catch(e => addNote(`stop failed: ${e.message}`, "bad center"));
 $("#restart").onclick = () => {
   if (confirm("Start a new conversation? The agent forgets everything said so far.")) post("/api/session/restart").catch(() => {});
+};
+$("#shutdown").onclick = async () => {
+  if (!confirm("Shut down Agent Eyes? This stops the agent, voice and camera. Run agent-eyes again to restart.")) return;
+  try { await post("/api/shutdown"); }
+  catch (e) { return addNote(`shut down failed: ${e.message}`, "bad center"); }
+  document.title = "Agent Eyes (stopped)";
+  document.body.innerHTML = '<div class="stopped"><b>Agent Eyes stopped</b><span>Run <code>agent-eyes</code> again to start a new session.</span></div>';
 };
 
 pollEvents();
