@@ -165,6 +165,15 @@
   .popover .pbody .caption { padding: 8px 12px; font-size: 16px; }
   .popover .pbody .muted { padding: 0 12px 8px; color: var(--muted); font-size: 12px; }
   .popover .pbody pre { margin: 0; padding: 10px 12px; font-size: 12px; white-space: pre-wrap; }
+  .popover .steps { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .popover .steps .dots { flex: 1; display: flex; gap: 4px; justify-content: center; flex-wrap: wrap; }
+  .popover .steps .dots button { min-width: 30px; padding: 2px 6px; font-variant-numeric: tabular-nums; }
+  .popover .steps .dots button.done { color: var(--muted); }
+  .popover .steps .dots button.at { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 700; }
+  .popover .steps > button { font-size: 15px; padding: 5px 14px; }
+  .popover .pbody:has(> .steps) > img { max-height: calc(92vh - 250px); }  /* nav, title and caption stay in view */
+  .popover .steptitle { padding: 8px 12px 6px; font-size: 20px; font-weight: 700; }
+  .popover .steptitle small { color: var(--muted); font-size: 14px; font-weight: 600; margin-right: 6px; }
   .note.pop { cursor: pointer; }
   .note.pop:hover { color: var(--accent); }
 
@@ -416,6 +425,12 @@ function handle(e, live) {
     case "popover_close":
       for (const id of e.ids) closePopover(id);
       break;
+    case "popover_step": {
+      const pop = popovers.get(e.id);
+      pop?.view?.step(e.step);
+      if (e.by === "voice") addNote(`step ${e.step} of ${e.total}${pop ? ` · ${$(".steptitle", pop).lastChild.textContent}` : ""}`, "center");
+      break;
+    }
   }
 }
 
@@ -498,6 +513,52 @@ const POPOVER_RENDERERS = {
     body.append(el("div", "muted", `capture ${p.capture}${src ? ` · ${src.detail} · ${fmtRegion(src.region)}` : ""}`));
     return { width: Math.max(320, Math.min(600, innerHeight * 0.6 * p.width / p.height)) };  // image about 60vh tall at most
   },
+  // One annotated capture per step: back/next and a button per step on top (so they don't move), the step's
+  // image and what to do below. The server keeps the step showing ("popover_step" events, also from voice).
+  steps(p, body, e) {
+    const n = p.steps.length;
+    const nav = el("div", "steps"), dots = el("div", "dots");
+    const back = el("button", null, "‹ Back"), next = el("button", "primary", "Next ›");
+    back.title = 'Previous step (or say "back")';
+    next.title = 'Next step (or say "next")';
+    const go = step => {
+      if (step < 1 || step > n) return;
+      show(step);
+      post("/api/session/popovers/step", { id: e.id, step }).catch(err => addNote(`step change failed: ${err.message}`, "bad center"));
+    };
+    const buttons = p.steps.map((s, i) => {
+      const b = el("button", null, String(i + 1));
+      b.title = s.title;
+      b.onclick = () => go(i + 1);
+      return b;
+    });
+    dots.append(...buttons);
+    nav.append(back, dots, next);
+    const head = el("div", "steptitle"), img = el("img"), caption = el("div", "caption"), info = el("div", "muted");
+    body.append(nav, head, img, caption, info);
+    for (const s of p.steps) new Image().src = s.image;  // preload, so stepping is instant
+    let at = 1;
+    function show(step) {
+      at = step;
+      const s = p.steps[step - 1];
+      head.replaceChildren(el("small", null, `Step ${step} of ${n}`), s.title);
+      img.src = s.image;
+      img.alt = s.title;
+      img.style.aspectRatio = `${s.width} / ${s.height}`;
+      caption.textContent = s.say;
+      const src = shots.get(s.source);
+      info.textContent = `capture ${s.capture}${src ? ` · ${src.detail} · ${fmtRegion(src.region)}` : ""}` +
+        `${s.earlier.length ? " · earlier steps in grey" : ""} · say "next", "back" or "repeat"`;
+      buttons.forEach((b, i) => { b.className = i + 1 === step ? "at" : i + 1 < step ? "done" : ""; });
+      back.disabled = step === 1;
+      next.disabled = step === n;
+    }
+    back.onclick = () => go(at - 1);
+    next.onclick = () => go(at + 1);
+    show(p.step || 1);
+    const aspect = Math.max(...p.steps.map(s => s.width / s.height));
+    return { width: Math.max(420, Math.min(640, innerHeight * 0.55 * aspect)), step: show, at: () => at, go };
+  },
 };
 
 const popovers = new Map();  // id -> element
@@ -511,6 +572,7 @@ function openPopover(e) {
   const render = POPOVER_RENDERERS[e.kind] || ((p, b) => b.append(el("pre", null, JSON.stringify(p, null, 2))));
   const size = render(e.payload, body, e);
   if (size?.width) pop.style.width = `min(${size.width}px, 90vw)`;
+  pop.view = size;  // a renderer's handles for later events (steps: step(), go())
   // Cascade new popovers over the left column.
   const k = popovers.size % 8;
   Object.assign(pop.style, { left: `${24 + k * 32}px`, top: `${110 + k * 32}px` });
@@ -559,6 +621,15 @@ function dragBy(handle, pop) {
     handle.addEventListener("pointercancel", up);
   });
 }
+
+// Arrow keys move through the steps popover on top (unless typing).
+document.addEventListener("keydown", ev => {
+  if (ev.target.closest("input, textarea") || !["ArrowLeft", "ArrowRight"].includes(ev.key)) return;
+  const pop = [...popovers.values()].filter(p => p.view?.go).sort((a, b) => b.style.zIndex - a.style.zIndex)[0];
+  if (!pop) return;
+  ev.preventDefault();
+  pop.view.go(pop.view.at() + (ev.key === "ArrowRight" ? 1 : -1));
+});
 
 // ---- live camera view -------------------------------------------------------
 

@@ -11,6 +11,12 @@ pass straight through; a kind can register a step in POPOVER_KINDS that checks t
 what the page needs. "annotated-image" renders the agent's marks over a capture into an SVG, saved
 next to the capture. The session keeps the open popovers in z-order (the page reports clicks with
 `raise_popover()`), so "dismiss" closes the one on top.
+
+"steps" is a group of annotated images the user steps through, one per step of the agent's
+instructions, starting at step 1. `step_popover()` moves it ("popover_step" event; from the page's
+buttons or the voice commands "next", "back", "repeat") and reads the step out. While one is open,
+the agent's prompt starts with the step on screen. Each step's SVG is saved, with
+{id}-steps.json listing the group.
 """
 
 from __future__ import annotations
@@ -19,12 +25,13 @@ import asyncio
 import json
 import threading
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
 from ..agent import CaptureBudget, CaptureEvent, CaptureLog, EyesAgent, TurnResult
 from ..agent.annotate import parse_annotations, render_svg
+from ..agent.steps import earlier_marks, parse_steps
 from ..camera import CameraSource, Capture, Detail, Region
 from .voice import LiveVoice
 
@@ -48,6 +55,16 @@ class FrontAlias:
         return await self._source.capture(self._ref if view == "front" else view, detail, region, reason)
 
 
+@dataclass(frozen=True)
+class StepMove:
+    """Where a steps popover is after `LiveSession.step_popover()`."""
+
+    id: str
+    step: int
+    total: int
+    moved: bool
+
+
 class LiveSession:
     """Lives on the backend's event loop. Thread-safe readers: events_after()."""
 
@@ -69,6 +86,7 @@ class LiveSession:
         self._popover_files: dict[str, tuple[str, bytes]] = {}
         self._popovers: list[str] = []  # open popover ids, topmost last
         self._popover_no = 0
+        self._steps: dict[str, dict] = {}  # steps popovers: id -> {"steps": [...], "at": step showing, from 1}
         self._events: list[dict] = []
         self._changed = threading.Condition()
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -129,7 +147,9 @@ class LiveSession:
         self._turn_no += 1
         self.push("user", text=text, turn=self._turn_no, **({"voice": True} if voice else {}))
         self._set_state("thinking")
-        self._turn = asyncio.create_task(self._run_turn(self._agent, text, self._turn_no))
+        # Steps on screen: the agent learns which one, so "is this right?" is about that step.
+        prompt = f"{screen}\n{text}" if (screen := self._on_screen()) else text
+        self._turn = asyncio.create_task(self._run_turn(self._agent, prompt, self._turn_no))
 
     async def interrupt(self) -> None:
         if self.state == "thinking" and self._agent:
@@ -200,7 +220,7 @@ class LiveSession:
             raise ValueError("a popover needs a kind and a payload object")
         pid = f"p{self._popover_no + 1}"
         prepare = POPOVER_KINDS.get(kind)
-        payload = prepare(self, pid, payload) if prepare else payload
+        payload = prepare(self, pid, title, payload) if prepare else payload
         self._popover_no += 1
         self._popovers.append(pid)
         self.push("popover", turn=self._turn_no, id=pid, kind=kind, title=title or kind, payload=payload)
@@ -218,6 +238,8 @@ class LiveSession:
             self._popovers.remove(which)
         else:
             ids = []
+        for pid in ids:
+            self._steps.pop(pid, None)
         if ids:
             self.push("popover_close", ids=ids)
         return ids
@@ -228,19 +250,91 @@ class LiveSession:
             self._popovers.remove(pid)
             self._popovers.append(pid)
 
-    def _annotated_image(self, pid: str, payload: dict) -> dict:
+    def _annotated_image(self, pid: str, title: str, payload: dict) -> dict:
         number = payload.get("capture")
         cap = self._capture_log.get(number) if isinstance(number, int) else None
         if cap is None:
             raise ValueError(f"there is no capture {number}")
         annotations = parse_annotations(payload.get("annotations"))
         cid = self._cid(number, cap.detail)
-        name = f"{cid}-{pid}.svg"
+        name, width, height = self._render(f"{cid}-{pid}.svg", cap, annotations)
+        return {"capture": number, "source": cid, "annotations": annotations, "caption": str(payload.get("caption") or ""),
+                "image": f"/api/session/files/{name}", "width": width, "height": height}
+
+    def _steps_popover(self, pid: str, title: str, payload: dict) -> dict:
+        """One SVG per step (its own marks, plus the earlier steps' in grey unless `show_earlier` is false),
+        and {pid}-steps.json listing them, for review."""
+        steps = parse_steps(payload.get("steps"), self._capture_log.latest)
+        caps = []
+        for n, s in enumerate(steps, 1):
+            cap = self._capture_log.get(s["capture"])
+            if cap is None:
+                raise ValueError(f"step {n}: there is no capture {s['capture']}")
+            caps.append(cap)
+        show_earlier = payload.get("show_earlier", True) is not False
+        out = []
+        for n, (s, cap) in enumerate(zip(steps, caps), 1):
+            earlier = [m for prev, pcap in zip(steps[:n - 1], caps) for m in earlier_marks(prev["annotations"], pcap, cap)
+                       ] if show_earlier else []
+            cid = self._cid(s["capture"], cap.detail)
+            name, width, height = self._render(f"{cid}-{pid}-s{n}.svg", cap, earlier + s["annotations"])
+            out.append({**s, "source": cid, "earlier": earlier, "image": f"/api/session/files/{name}",
+                        "width": width, "height": height})
+        (self.out_dir / f"{pid}-steps.json").write_text(json.dumps(
+            {"id": pid, "turn": self._turn_no, "title": title, "show_earlier": show_earlier, "steps": out},
+            indent=2))
+        self._steps[pid] = {"steps": out, "at": 1}
+        return {"steps": out, "step": 1, "show_earlier": show_earlier}
+
+    def _render(self, name: str, cap: Capture, annotations: list[dict]) -> tuple[str, int, int]:
+        """Draws `annotations` over `cap` into SVG file `name` (saved and served); returns (name, width, height)."""
         svg = render_svg(cap.image, cap.mime, cap.width, cap.height, annotations).encode()
         (self.out_dir / name).write_bytes(svg)
         self._popover_files[name] = ("image/svg+xml", svg)
-        return {"capture": number, "source": cid, "annotations": annotations, "caption": str(payload.get("caption") or ""),
-                "image": f"/api/session/files/{name}", "width": cap.width, "height": cap.height}
+        return name, cap.width, cap.height
+
+    # ---- step groups (on the loop) ----------------------------------------------
+
+    def step_popover(self, to: str | int, which: str = "top", *, by: str = "") -> StepMove | None:
+        """Moves steps popover `which` (an id, or "top": the topmost steps popover) to step `to` ("next",
+        "back", "repeat" or a number from 1), reading it out if speech is on. None if there is no such popover.
+
+        Moving past either end stays put (`moved` is false). Every move but that is a "popover_step" event."""
+        pid = self._top_steps() if which == "top" else which if which in self._steps else None
+        if pid is None:
+            return None
+        group = self._steps[pid]
+        total, at = len(group["steps"]), group["at"]
+        if to == "next":
+            step = at + 1
+        elif to == "back":
+            step = at - 1
+        elif to == "repeat":
+            step = at
+        elif isinstance(to, int) and not isinstance(to, bool):
+            step = to
+        else:
+            raise ValueError(f"can't go to step {to!r}")
+        if not 1 <= step <= total:
+            return StepMove(pid, at, total, moved=False)
+        group["at"] = step
+        self.push("popover_step", id=pid, step=step, total=total, **({"by": by} if by else {}))
+        s = group["steps"][step - 1]
+        if self.voice:
+            self.voice.read_out(f"Step {step}. {s['say']}")
+        return StepMove(pid, step, total, moved=True)
+
+    def _top_steps(self) -> str | None:
+        return next((p for p in reversed(self._popovers) if p in self._steps), None)
+
+    def _on_screen(self) -> str | None:
+        """The step showing in the topmost steps popover, for the agent."""
+        if (pid := self._top_steps()) is None:
+            return None
+        group = self._steps[pid]
+        at, total = group["at"], len(group["steps"])
+        last = " (the last)" if at == total else ""
+        return f"[On the user's screen: steps popover {pid}, at step {at} of {total}{last}: {group['steps'][at - 1]['title']}.]"
 
     # ---- readers -------------------------------------------------------------
 
@@ -287,5 +381,7 @@ class LiveSession:
 
 POPOVER_KINDS = {
     "annotated-image": LiveSession._annotated_image,
+    "steps": LiveSession._steps_popover,
 }
-"""Per-kind step that checks a popover's payload and adds what the page needs to show it (kinds not listed pass through)."""
+"""Per-kind step, (session, id, title, payload) -> payload, that checks a popover's payload and adds what the page
+needs to show it (kinds not listed pass through)."""

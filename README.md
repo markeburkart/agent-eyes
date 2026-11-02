@@ -37,6 +37,14 @@ The dashboard shows:
   that needs "hey eyes" unless the conversation is live. New conversation closes them too. Each
   annotated capture is saved as an SVG next to the capture (`003-inspect-p2.svg`), and its marks
   are in `transcript.jsonl`
+- steps: for instructions with several physical steps (wiring power, ground and two signal pins,
+  then setting a switch) the agent opens one popover you step through, starting at step 1: one
+  marked-up capture per step, marking only that step, with the earlier steps' marks in grey. Move
+  with Back / Next, the step numbers or the arrow keys, or say "next" (or "done"), "back" or
+  "repeat"; each step is read out as you get to it. With no steps to move through ("next" on the
+  last one, or none open), those words go to the agent like any request. While steps are open the
+  agent knows which one is showing, so "is this right?" is about that step. Each step's SVG is
+  saved (`002-inspect-p1-s3.svg`) with `p1-steps.json` listing the group
 - New conversation (the agent forgets everything said so far; or say "hey eyes, new
   conversation", "start over" or "clear context") and Shut down (stops the agent, voice and
   camera helper and exits, like Ctrl-C)
@@ -103,8 +111,8 @@ uv run agent-eyes chat --voice --follow-up 60          # keep conversations open
 ```
 src/agent_eyes/
   cli.py           the agent-eyes command
-  agent/           Claude Agent SDK session (session.py), capture_frame and annotate_capture tools (tools.py),
-                   annotations rendered to SVG (annotate.py), capture budget (budget.py)
+  agent/           Claude Agent SDK session (session.py), capture_frame, annotate_capture and show_steps tools
+                   (tools.py), annotations rendered to SVG (annotate.py), steps (steps.py), capture budget (budget.py)
   camera/          camera abstraction (base.py) and the camsvc-backed source (continuity.py)
   voice/           voicesvc (helper.py), wake word + dictation and spoken actions (commands.py), readout echo filter (echo.py)
   web/             local web server (server.py), the agent session behind the dashboard (live.py), pages (static/)
@@ -115,7 +123,7 @@ spike/             Phase 1 Continuity Camera capability probe
 
 ## Extending
 
-- Voice commands: the spoken actions ("new conversation", "dismiss", "dismiss all") are the
+- Voice commands: the spoken actions ("new conversation", "dismiss", "dismiss all", "next", ...) are the
   `ACTIONS` table in `voice/commands.py`, phrases by name. Add an entry there and a handler with
   the same name in `LiveVoice.actions` (`web/voice.py`); edit the phrases to change what's said.
 - Popovers: the page draws each kind of popover with a renderer in `POPOVER_RENDERERS`

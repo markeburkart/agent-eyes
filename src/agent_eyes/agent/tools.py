@@ -12,14 +12,17 @@ from claude_agent_sdk import create_sdk_mcp_server, tool
 from ..camera import CameraError, CameraSource, Capture, Region
 from .annotate import ANNOTATION_SCHEMA, MAX_ANNOTATIONS
 from .budget import CaptureBudget
+from .steps import MAX_STEPS, STEP_SCHEMA
 
 SERVER_NAME = "eyes"
 CAPTURE_TOOL = f"mcp__{SERVER_NAME}__capture_frame"
 ANNOTATE_TOOL = f"mcp__{SERVER_NAME}__annotate_capture"
+STEPS_TOOL = f"mcp__{SERVER_NAME}__show_steps"
 
 ShowPopover = Callable[[str, str, dict], str]
 """show_popover(kind, title, payload) -> popover id: opens a popover on the dashboard; raises ValueError
-for a payload it can't show. Kinds so far: "annotated-image" ({"capture": n, "annotations": [...], "caption": str})."""
+for a payload it can't show. Kinds so far: "annotated-image" ({"capture": n, "annotations": [...], "caption": str})
+and "steps" ({"steps": [{"title", "say", "capture", "annotations"}, ...], "show_earlier": bool})."""
 
 CAPTURE_SCHEMA = {
     "type": "object",
@@ -94,6 +97,17 @@ ANNOTATE_SCHEMA = {
         },
     },
     "required": ["title", "annotations"],
+}
+
+STEPS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string", "description": 'What the steps do, in a few words, e.g. "Wire the PN532 to the Pico".'},
+        "steps": {"type": "array", "description": f"2 to {MAX_STEPS} steps, in order.", "items": STEP_SCHEMA},
+        "show_earlier": {"type": "boolean", "description": "Draw earlier steps' marks in grey on each step's image, "
+                         "for context. Default true."},
+    },
+    "required": ["title", "steps"],
 }
 
 
@@ -178,7 +192,33 @@ def capture_server(
         return {"content": [{"type": "text", "text": f"Shown on the user's screen (popover {pid}, capture {number}). "
                              'They can close it themselves or say "dismiss".'}]}
 
-    tools = [capture_frame] + ([annotate_capture] if show_popover else [])
+    @tool(
+        "show_steps",
+        "Show instructions with more than one physical step (wiring several pins, a sequence of settings) as a "
+        "group the user steps through on their screen: one marked-up capture per step, marking only that step, "
+        "with earlier steps greyed. Steps can share a capture or each use their own (e.g. an inspect of the part "
+        "a step is about). Costs no capture.",
+        STEPS_SCHEMA,
+    )
+    async def show_steps(args: dict[str, Any]) -> dict[str, Any]:
+        if captures.latest is None:
+            return _error("No capture to mark up yet: take one with capture_frame first.")
+        assert show_popover is not None
+        try:
+            steps = args.get("steps")
+            pid = show_popover("steps", str(args.get("title", "")).strip(), {
+                "steps": steps, "show_earlier": args.get("show_earlier", True) is not False,
+            })
+        except (TypeError, ValueError) as e:
+            return _error(f"Not shown: {e}")
+        n = len(steps)
+        return {"content": [{"type": "text", "text":
+            f"Shown on the user's screen as steps popover {pid}, at step 1 of {n}. In your reply, say briefly that "
+            f"there are {n} steps on the screen and give step 1 only. Don't read the other steps: the screen reads "
+            'each one out as the user moves to it by saying "next", "back" or "repeat" (or with its buttons). '
+            "When the user writes to you while the steps are open, their message starts with the step on screen."}]}
+
+    tools = [capture_frame] + ([annotate_capture, show_steps] if show_popover else [])
     return create_sdk_mcp_server(SERVER_NAME, tools=tools)
 
 

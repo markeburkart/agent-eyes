@@ -26,7 +26,7 @@ import math
 import re
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from .echo import Echo
@@ -54,6 +54,11 @@ ACTIONS: dict[str, tuple[str, ...]] = {
     # Close every popover. "Dismissal" is how the recognizer can hear "dismiss all".
     "dismiss_all": ("dismiss all", "dismissal", "dismiss all of them", "dismiss them all", "dismiss them",
                     "dismiss everything"),
+    # Move through the steps on screen. Plain words, so the app passes them on as a request (Action.text)
+    # when there are no steps to move through ("done" can be the answer to the agent's question).
+    "next_step": ("next", "next step", "next one", "done", "got it", "ok next", "okay next"),
+    "previous_step": ("back", "go back", "previous", "previous step", "step back", "back one"),
+    "repeat_step": ("repeat", "repeat that", "repeat the step", "say again", "say that again", "again"),
 }
 _FILLER = " ,.;:!?-"
 _HESITATIONS = {"um", "uh", "hmm", "mm", "ah", "er", "oh"}
@@ -134,6 +139,8 @@ class Action:
     """The request was one of the phrases of action `name` (see ACTIONS), for the app to carry out."""
 
     name: str
+    text: str = field(default="", compare=False)
+    """What was said, to send as a request if the app can't carry the action out now."""
 
 
 @dataclass(frozen=True)
@@ -312,7 +319,7 @@ async def voice_commands(
                 yield Cancelled("cancelled", command)
             elif name := action_for(command, actions or {}):
                 focus.start()
-                yield Action(name)
+                yield Action(name, command)
             elif not is_hesitation(command):
                 focus.start()
                 yield Command(command)
