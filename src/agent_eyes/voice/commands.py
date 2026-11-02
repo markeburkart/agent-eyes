@@ -12,6 +12,8 @@ answering). "Ok thanks", "that's all" or "stop listening" closes it straight awa
 Replies are read out with the mic still on. While the assistant is speaking, dictation pauses
 and its own words are filtered out of what the mic hears (`Echo`); saying "stop" or "ok" cuts
 the readout short, and "ok thanks" (or any other closing phrase) also closes the conversation.
+"Slow down" makes the assistant speak more slowly from then on (each time it's said), going back to
+the start of the sentence it's reading out; said as a request on its own it only lowers the rate.
 
 Spoken actions: a request that is nothing but one of an action's phrases ("hey eyes, new
 conversation", "dismiss") yields Action(name) instead of a Command, for the app to carry out
@@ -42,6 +44,7 @@ CANCEL_PHRASES = ("never mind", "nevermind", "cancel")  # a request ending with 
 END_PHRASES = ("that's all", "that is all", "stop listening", "goodbye",  # a request ending with one closes the
                "ok thanks", "okay thanks", "ok thank you", "okay thank you")  # conversation (also during a readout)
 INTERRUPT_WORDS = ("stop", "ok", "skip")  # cut a readout short
+SLOW_DOWN_PHRASES = ("slow down", "slowdown", "slower")  # speak more slowly (during a readout, or as a request)
 
 # Spoken actions, by name: a request that is exactly one of the phrases yields Action(name).
 # To add a command, add an entry here and a handler with the same name where voice_commands runs
@@ -65,6 +68,7 @@ class TranscriptSource(Protocol):
     async def next(self, timeout: float | None = None) -> Transcript | None: ...
     async def finalize(self) -> None: ...
     async def stop_speaking(self) -> None: ...
+    async def slow_down(self) -> None: ...
 
 
 class Focus:
@@ -161,8 +165,13 @@ class Interrupted:
     word: str
 
 
+@dataclass(frozen=True)
+class SlowedDown:
+    """The user asked for slower speech; the source now speaks more slowly."""
+
+
 VoiceEvent = (WakeHeard | FollowUpHeard | Command | Action | Cancelled | ConversationOpened | ConversationEnded
-              | Interrupted)
+              | Interrupted | SlowedDown)
 
 
 def _words(text: str) -> list[re.Match[str]]:
@@ -207,6 +216,11 @@ def is_end(command: str) -> bool:
     return _ends_with(command, END_PHRASES)
 
 
+def slow_downs(words: list[str]) -> int:
+    """How many times `words` ask to slow down."""
+    return len(re.findall(r"\b(?:" + "|".join(SLOW_DOWN_PHRASES) + r")\b", " ".join(words)))
+
+
 def action_for(command: str, actions: Mapping[str, tuple[str, ...]] = ACTIONS) -> str | None:
     """The action whose phrase is the whole request, if any ("let's start over with pin five" is a request)."""
     spoken = " ".join(m.group() for m in _words(command))
@@ -243,6 +257,7 @@ async def voice_commands(
     in_echo = False  # the assistant is (or just was) speaking: listen only for interrupt words
     interrupted = False
     closed = False  # a closing phrase was heard during this readout
+    slowed = 0  # "slow down"s acted on during this readout
     woke_at: int | None = None  # words up to the end of the wake word that started this dictation
     echo = source.echo
 
@@ -257,7 +272,7 @@ async def voice_commands(
     while True:
         if in_echo and not echo.active:
             # The readout (and its delayed transcript) is over; start listening afresh.
-            settled, volatile, in_echo, interrupted, closed = "", "", False, False, False
+            settled, volatile, in_echo, interrupted, closed, slowed = "", "", False, False, False, 0
         if focus.closing is not None:
             reason, focus.closing = focus.closing, None
             if echo.speaking:
@@ -310,6 +325,10 @@ async def voice_commands(
             elif is_cancel(command):
                 focus.extend()
                 yield Cancelled("cancelled", command)
+            elif action_for(command, {"slow_down": SLOW_DOWN_PHRASES}):
+                focus.start()
+                await source.slow_down()
+                yield SlowedDown()
             elif name := action_for(command, actions or {}):
                 focus.start()
                 yield Action(name)
@@ -349,6 +368,10 @@ async def voice_commands(
                 focus.end()
                 was_focused = False
                 continue
+            if not interrupted and echo.speaking and (n := slow_downs(left)) > slowed:
+                slowed = n
+                await source.slow_down()
+                yield SlowedDown()
             if not interrupted and echo.speaking:
                 if word := next((w for w in INTERRUPT_WORDS if w in said), None):
                     interrupted = True

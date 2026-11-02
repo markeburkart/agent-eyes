@@ -86,6 +86,14 @@ Replies are read out with the Mac's voice (`--no-speech` for text only; `--speec
 `--voice` to hear replies to typed requests). The mic stays on while the agent speaks, but its
 own words are filtered out of what the mic hears, so requests pause during the readout; say
 "stop" or "ok" to cut it short, or "ok thanks" to cut it short and close the conversation.
+Say "slow down" (or "slower") to have it speak more slowly from then on: it goes back to the
+start of the sentence it was reading and carries on at the slower pace. Each "slow down" slows it
+a bit more, until the next start. Said on its own as a request, it just slows the next replies.
+
+Instructions with several steps come one step per reply: the agent says how many steps there
+are, gives the first, and waits for you to say "next" or "done" before the next one ("repeat"
+says the current one again). If a step takes longer than the 30 s follow-up window, start with the
+wake word: "hey eyes, next".
 
 Both can be switched during a chat by typing `/voice` (voice commands; off closes the mic) and
 `/speech` (reading replies out; off also stops a readout in progress), or `/voice on|off`,

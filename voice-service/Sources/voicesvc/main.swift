@@ -30,6 +30,7 @@
 //   finalize            settle all pending volatile results now (as if the speaker had paused for long)
 //   speak ID TEXT       queue TEXT (one line) to be spoken as utterance ID
 //   stop_speaking       cut off the current utterance and drop the queued ones (each reports "spoken")
+//   rate R              speaking rate for utterances queued from now on, 0..1 (AVSpeechUtterance's; default 0.5)
 //   mic on|off          open or close the microphone (replies with a "mic" event)
 // The helper exits when stdin closes, so it never outlives its parent. Logs go to stderr.
 
@@ -80,6 +81,7 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate, @unchecked Sendable 
     private let volume: Float
     private let lock = NSLock()
     private var pending: [ObjectIdentifier: Int] = [:]  // utterance -> id, until it reports "spoken"
+    private var rate = AVSpeechUtteranceDefaultSpeechRate
 
     init(language: String, volume: Float) {
         voice = AVSpeechSynthesisVoice(language: language)
@@ -92,8 +94,15 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate, @unchecked Sendable 
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = voice
         utterance.volume = volume
-        lock.withLock { pending[ObjectIdentifier(utterance)] = id }
+        lock.withLock {
+            utterance.rate = rate
+            pending[ObjectIdentifier(utterance)] = id
+        }
         synth.speak(utterance)
+    }
+
+    func setRate(_ r: Float) {
+        lock.withLock { rate = min(max(r, AVSpeechUtteranceMinimumSpeechRate), AVSpeechUtteranceMaximumSpeechRate) }
     }
 
     func stop() {
@@ -302,6 +311,7 @@ do {
         case "finalize": try await analyzer.finalize(through: nil)
         case "speak" where parts.count == 3 && Int(parts[1]) != nil: speaker.speak(id: Int(parts[1])!, text: parts[2])
         case "stop_speaking": speaker.stop()
+        case "rate" where parts.count == 2 && Float(parts[1]) != nil: speaker.setRate(Float(parts[1])!)
         case "mic" where parts.count == 2 && ["on", "off"].contains(parts[1]): await setMic(parts[1] == "on")
         case "": break
         default: log("unknown command \(line)")
