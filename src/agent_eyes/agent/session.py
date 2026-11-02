@@ -9,7 +9,7 @@ from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ClaudeSDKClie
 
 from ..camera import CameraSource
 from .budget import CaptureBudget
-from .tools import ANNOTATE_TOOL, CAPTURE_TOOL, SERVER_NAME, CaptureEvent, CaptureLog, ShowPopover, capture_server
+from .tools import ANNOTATE_TOOL, CAPTURE_TOOL, SERVER_NAME, STEPS_TOOL, CaptureEvent, CaptureLog, ShowPopover, capture_server
 
 DEFAULT_MODEL = "claude-opus-5-5"
 
@@ -52,6 +52,17 @@ user's screen. Coordinates are fractions of that capture's own image from the to
 inspect, that's the region you inspected, not the whole frame.
 - Use it when a location is easier to show than to say. Still say briefly what you marked, e.g. \
 "I've circled the pin on the screen."
+- When the instructions have more than one physical step (wiring power, ground and two signal \
+pins; setting a switch, then plugging in a cable), use show_steps instead: one step per action, \
+in the order to do them, each with an image marking only that step. Don't put several steps' \
+marks on one image or open one popover per step.
+- For show_steps, mark up captures where the parts are big enough to see the pins. If they're \
+small in the overview, take one inspect of the area the steps are about (e.g. both boards) and use \
+it for those steps; add a closer inspect for a step only if it still needs one. Stay within the \
+captures you have left this turn, and give each step the capture number it should mark up.
+- Your reply to show_steps gives step 1 only, as above. From then on the screen does the stepping: \
+it reads each step out as the user says "next", "back" or "repeat", so don't give the next step \
+yourself. When the user's message starts with the step on screen, answer about that step.
 """
 
 
@@ -91,7 +102,7 @@ class EyesAgent:
                 # No built-in Claude Code tools (Bash, Read, ...): the agent only gets the camera (and the screen).
                 tools=[],
                 mcp_servers={SERVER_NAME: capture_server(camera, self.budget, on_capture, self.captures, show_popover)},
-                allowed_tools=[CAPTURE_TOOL] + ([ANNOTATE_TOOL] if show_popover else []),
+                allowed_tools=[CAPTURE_TOOL] + ([ANNOTATE_TOOL, STEPS_TOOL] if show_popover else []),
                 # Don't pick up the developer's own CLAUDE.md, skills or settings.
                 setting_sources=[],
             )

@@ -9,7 +9,8 @@ POST /api/shutdown stops everything, like Ctrl-C.
 Popovers on the dashboard: POST /api/session/popovers {kind, title, payload} opens one (what the
 agent's annotate_capture does), /api/session/popovers/dismiss {which: "top" | "all" | id} closes
 them (the page's ×, the voice command "dismiss"), /api/session/popovers/raise {id} records that the
-page brought one to the front.
+page brought one to the front, /api/session/popovers/step {id, step} moves a steps popover to step
+`step` (a number from 1, or "next", "back", "repeat"), like the voice commands "next" and "back".
 
 The agent runs in a LiveSession on the backend's event loop, with voice commands and replies read
 out (LiveVoice) in this process too, so the page can show the voice state. Manual captures go through the
@@ -198,6 +199,15 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"id": pid})
         elif self.path == "/api/session/popovers/dismiss":
             self._json(200, {"closed": self.backend.call(self.backend.session.dismiss_popovers, str(body.get("which", "top")))})
+        elif self.path == "/api/session/popovers/step":
+            to = body.get("step")
+            try:
+                move = self.backend.call(lambda: self.backend.session.step_popover(to, str(body.get("id", "")), by="page"))
+            except ValueError as e:
+                return self._json(400, {"error": "bad_request", "message": str(e)})
+            if move is None:
+                return self._json(404, {"error": "not_found", "message": "no such steps popover"})
+            self._json(200, {"step": move.step, "total": move.total, "moved": move.moved})
         elif self.path == "/api/session/popovers/raise":
             self.backend.call(self.backend.session.raise_popover, str(body.get("id", "")))
             self._json(200, {"ok": True})

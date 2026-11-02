@@ -7,7 +7,8 @@ dictating, answering (the agent is working on a request or reading its reply out
 button to close it (`end_conversation()`, like saying "ok thanks"). Spoken actions (ACTIONS) are
 carried out by the handlers in `actions`: "new conversation" clears the agent's context like the
 page's New conversation button, "dismiss" / "dismiss all" closes the popover on top / all popovers,
-like their × buttons. Each
+like their × buttons, and "next" / "back" / "repeat" move through the steps popover on top (with no
+steps to move through, they go to the agent like any request). Each
 change is also a session event, so the page's long poll picks it up at once. The same sounds as
 in the terminal chat play.
 """
@@ -17,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -77,12 +78,17 @@ class LiveVoice:
         self._listen_task: asyncio.Task | None = None
         self._restart_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
-        self.actions: dict[str, Callable[[], None]] = {
-            "new_conversation": self.new_conversation,
-            "dismiss": lambda: self.dismiss(all=False),
-            "dismiss_all": lambda: self.dismiss(all=True),
+        self._readout_task: asyncio.Task | None = None
+        self.actions: dict[str, Callable[[str], Awaitable[None] | None]] = {
+            "new_conversation": lambda said: self.new_conversation(),
+            "dismiss": lambda said: self.dismiss(all=False),
+            "dismiss_all": lambda said: self.dismiss(all=True),
+            "next_step": lambda said: self.step("next", said),
+            "previous_step": lambda said: self.step("back", said),
+            "repeat_step": lambda said: self.step("repeat", said),
         }
-        """Handlers for the spoken actions (voice ACTIONS) the dashboard carries out, by name."""
+        """Handlers for the spoken actions (voice ACTIONS) the dashboard carries out, by name. Each gets what
+        was said and may return an awaitable."""
 
     async def set(self, *, listening: bool | None = None, speaking: bool | None = None) -> None:
         """Switches voice commands and/or speech on or off, starting voicesvc the first time either is on."""
@@ -185,6 +191,39 @@ class LiveVoice:
         n = len(closed)
         self.session.push("voice", text=f"dismissed {n} popover{'s' * (n != 1)}" if n else "no popover to dismiss")
 
+    def step(self, to: str, said: str) -> Awaitable[None] | None:
+        """Moves the steps popover on top ("next", "back", "repeat"); the session reads the step out.
+        Without steps to move through ("next" on the last one, or none open), `said` goes to the agent."""
+        move = self.session.step_popover(to, by="voice")
+        if move is None or (to == "next" and not move.moved):
+            return self.request(said)
+        if not move.moved:
+            chime("Bottle")
+            self.session.push("voice", text=f"already at step 1 of {move.total}")
+            return None
+        chime("Pop")
+        return None
+
+    async def request(self, text: str) -> None:
+        """Sends a spoken request to the agent."""
+        chime("Pop")
+        try:
+            await self.session.ask(text, voice=True)
+        except RuntimeError as e:
+            chime("Bottle")
+            self.session.push("status", text=f'not sent ({e}), please repeat: "{text}"', error=True)
+
+    def read_out(self, text: str) -> None:
+        """Reads `text` out instead of whatever is being read now (e.g. the step the user moved to)."""
+        if not (self.speaking and self._helper):
+            return
+        helper = self._helper
+
+        async def replace() -> None:
+            await helper.stop_speaking()
+            await helper.speak(text)
+        self._readout_task = asyncio.create_task(replace())
+
     async def say(self, text: str) -> None:
         if self.speaking and self._helper:
             await self._helper.speak(text)
@@ -217,15 +256,11 @@ class LiveVoice:
                 if isinstance(event, Command):
                     if not self.listening:
                         continue  # cut off by switching voice commands off
-                    chime("Pop")
-                    try:
-                        await self.session.ask(event.text, voice=True)
-                    except RuntimeError as e:
-                        chime("Bottle")
-                        push("status", text=f'not sent ({e}), please repeat: "{event.text}"', error=True)
+                    await self.request(event.text)
                 elif isinstance(event, Action):
                     if self.listening:  # otherwise cut off by switching voice commands off
-                        self.actions[event.name]()
+                        if (pending := self.actions[event.name](event.text)) is not None:
+                            await pending
                 elif isinstance(event, ConversationOpened):
                     push("voice", text=f"conversation live: follow up without the wake word; closes after "
                                        f"{self.focus.seconds:g} s of quiet or when you say \"ok thanks\" or \"that's all\"")

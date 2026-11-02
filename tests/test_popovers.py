@@ -1,5 +1,6 @@
 """Popovers on the dashboard: the agent's annotations (checked and rendered to SVG), opening them
-through the session, and closing them (×, "dismiss", "dismiss all", new conversation).
+through the session, and closing them (×, "dismiss", "dismiss all", new conversation); steps
+popovers (one image per step, earlier steps greyed) and moving through them ("next", "back", "repeat").
 
 Run with: uv run python -m unittest discover tests
 """
@@ -14,16 +15,18 @@ from unittest import mock
 
 from agent_eyes.agent import CaptureBudget, CaptureLog
 from agent_eyes.agent.annotate import COLORS, parse_annotations, render_svg
-from agent_eyes.camera import Capture
+from agent_eyes.agent.steps import EARLIER_COLOR, earlier_marks, parse_steps
+from agent_eyes.camera import Capture, Region
 from agent_eyes.camera.base import CameraInfo
 from agent_eyes.web.live import LiveSession
 from agent_eyes.web.voice import LiveVoice, VoiceOptions
 
 
-def capture(detail: str = "overview", width: int = 640, height: int = 480) -> Capture:
+def capture(detail: str = "overview", width: int = 640, height: int = 480, region: Region | None = None,
+            camera: str = "cam") -> Capture:
     return Capture(image=b"\xff\xd8 fake jpeg", mime="image/jpeg", width=width, height=height,
-                   camera=CameraInfo("cam", "Test Camera", "built_in"), detail=detail, reason="test",
-                   region=None, source_size=(width, height), captured_at=datetime.now())
+                   camera=CameraInfo(camera, "Test Camera", "built_in"), detail=detail, reason="test",
+                   region=region, source_size=(width, height), captured_at=datetime.now())
 
 
 BOX = {"shape": "box", "x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4, "label": "pin 5"}
@@ -169,13 +172,186 @@ class PopoverSessionTest(unittest.TestCase):
     def test_voice_dismiss(self, chime):
         voice = LiveVoice(self.session, VoiceOptions())
         p1, p2 = self.open(2)
-        voice.actions["dismiss"]()
-        voice.actions["dismiss_all"]()
-        voice.actions["dismiss_all"]()
+        voice.actions["dismiss"]("dismiss")
+        voice.actions["dismiss_all"]("dismiss all")
+        voice.actions["dismiss_all"]("dismiss all")
         self.assertEqual([e["ids"] for e in self.events("popover_close")], [[p2], [p1]])
         self.assertEqual([e["text"] for e in self.events("voice")][-3:],
                          ["dismissed 1 popover", "dismissed 1 popover", "no popover to dismiss"])
         self.assertEqual([c.args[0] for c in chime.call_args_list], ["Pop", "Pop", "Bottle"])
+
+
+CIRCLE = {"shape": "circle", "x": 0.5, "y": 0.5, "w": 0.1, "h": 0.1, "label": "GND"}
+
+
+def step(title: str, *annotations: dict, **extra) -> dict:
+    return {"title": title, "say": f"Do {title}.", "annotations": list(annotations), **extra}
+
+
+class ParseStepsTest(unittest.TestCase):
+    def test_steps(self):
+        got = parse_steps([step("Power", BOX), step("Ground", CIRCLE, capture=1), step("Switch")], latest=2)
+        self.assertEqual([s["capture"] for s in got], [2, 1, 2])  # the latest capture unless given
+        self.assertEqual(got[0]["annotations"][0]["color"], COLORS["yellow"])
+        self.assertEqual(got[2]["annotations"], [])  # a step may have nothing to mark
+
+    def test_bad_steps(self):
+        for bad, why in (([step("Only", BOX)], "at least 2"), (None, "at least 2"), ([step("A"), "B"], "step 2"),
+                         ([step("A"), {"title": "B", "annotations": []}], "step 2 needs"),
+                         ([step("A"), step("B", {"shape": "star"})], "step 2: annotation 1"),
+                         ([step("A"), step("B", capture="first")], "step 2: capture"), ([step("A")] * 13, "at most")):
+            with self.subTest(why=why):
+                with self.assertRaisesRegex(ValueError, why):
+                    parse_steps(bad, latest=1)
+        with self.assertRaisesRegex(ValueError, "capture"):
+            parse_steps([step("A"), step("B")], latest=None)
+
+
+class EarlierMarksTest(unittest.TestCase):
+    def test_same_capture_is_greyed_without_labels(self):
+        cap = capture()
+        [m] = earlier_marks(parse_annotations([BOX]), cap, cap)
+        self.assertEqual(m, {"shape": "box", "x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4, "color": EARLIER_COLOR})
+
+    def test_moved_onto_an_inspect_of_a_region(self):
+        overview, crop = capture(), capture("inspect", region=Region(0.5, 0.5, 0.5, 0.5))
+        marks = parse_annotations([
+            {"shape": "circle", "x": 0.6, "y": 0.6, "w": 0.1, "h": 0.1},  # inside the crop
+            {"shape": "box", "x": 0.4, "y": 0.4, "w": 0.2, "h": 0.2},  # half in: cut to it
+            {"shape": "arrow", "x1": 0.1, "y1": 0.1, "x2": 0.7, "y2": 0.7},  # tail outside: dropped
+            {"shape": "text", "x": 0.6, "y": 0.6, "label": "VCC"},  # only a label: dropped
+        ])
+        got = earlier_marks(marks, overview, crop)
+        self.assertEqual([m["shape"] for m in got], ["circle", "box"])
+        for k, v in {"x": 0.2, "y": 0.2, "w": 0.2, "h": 0.2}.items():
+            self.assertAlmostEqual(got[0][k], v)
+        for k, v in {"x": 0.0, "y": 0.0, "w": 0.2, "h": 0.2}.items():
+            self.assertAlmostEqual(got[1][k], v)
+        # And back: the crop's marks onto the overview.
+        [back] = earlier_marks(parse_annotations([{"shape": "box", "x": 0.2, "y": 0.2, "w": 0.2, "h": 0.2}]), crop, overview)
+        self.assertAlmostEqual(back["x"], 0.6)
+        self.assertAlmostEqual(back["w"], 0.1)
+
+    def test_other_camera(self):
+        self.assertEqual(earlier_marks(parse_annotations([BOX]), capture(), capture(camera="other")), [])
+
+
+class StepsPopoverTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.session = LiveSession(None, CaptureBudget(), self.dir, model="test")
+        log = self.session._capture_log
+        log.add(capture())
+        log.add(capture("inspect", 320, 240, region=Region(0.5, 0.5, 0.5, 0.5)))
+
+    def tearDown(self):
+        self.session._log.close()
+
+    def events(self, type: str) -> list[dict]:
+        return [e for e in self.session.events_after(0) if e["type"] == type]
+
+    def open(self, **extra) -> str:
+        return self.session.show_popover("steps", "Wire it", {"steps": [
+            step("Power", {"shape": "circle", "x": 0.6, "y": 0.6, "w": 0.1, "h": 0.1, "label": "VCC"}, capture=1),
+            step("Ground", BOX, capture=1),
+            step("Switch", CIRCLE, capture=2),
+        ], **extra})
+
+    def test_one_image_per_step(self):
+        pid = self.open()
+        [e] = self.events("popover")
+        p = e["payload"]
+        self.assertEqual((e["kind"], e["title"], p["step"], len(p["steps"])), ("steps", "Wire it", 1, 3))
+        s1, s2, s3 = p["steps"]
+        self.assertEqual([s["image"].rsplit("/", 1)[1] for s in p["steps"]],
+                         [f"001-overview-{pid}-s1.svg", f"001-overview-{pid}-s2.svg", f"002-inspect-{pid}-s3.svg"])
+        self.assertEqual((s1["earlier"], len(s2["earlier"]), len(s3["earlier"])), ([], 1, 1))  # step 2's box falls outside the crop
+        self.assertEqual(s3["earlier"][0]["shape"], "circle")
+        self.assertEqual((s3["width"], s3["source"]), (320, "002-inspect"))
+        self.assertGreater(s3["height"], 240)  # the inspect, plus the band for its label
+        svg2 = self.session.file(f"001-overview-{pid}-s2.svg")[1].decode()
+        self.assertIn(EARLIER_COLOR, svg2)
+        self.assertIn(">pin 5</text>", svg2)
+        self.assertNotIn(">VCC</text>", svg2)  # earlier steps' labels are left out
+        manifest = json.loads((self.dir / f"{pid}-steps.json").read_text())
+        self.assertEqual((manifest["title"], [s["title"] for s in manifest["steps"]]), ("Wire it", ["Power", "Ground", "Switch"]))
+        for s in p["steps"]:
+            self.assertTrue((self.dir / s["image"].rsplit("/", 1)[1]).exists())
+
+    def test_without_earlier_steps(self):
+        self.open(show_earlier=False)
+        self.assertEqual([s["earlier"] for s in self.events("popover")[0]["payload"]["steps"]], [[], [], []])
+
+    def test_bad_steps_open_nothing(self):
+        for steps in ([step("A", BOX)], [step("A", BOX), step("B", BOX, capture=9)]):
+            with self.subTest(steps=steps):
+                with self.assertRaises(ValueError):
+                    self.session.show_popover("steps", "x", {"steps": steps})
+        self.assertEqual((self.events("popover"), self.session._steps), ([], {}))
+
+    def test_moving_through_the_steps(self):
+        pid = self.open()
+        move = self.session.step_popover
+        self.assertEqual((move("back").step, move("back").moved), (1, False))
+        self.assertEqual([move("next").step, move("next").step, move("repeat").step], [2, 3, 3])
+        self.assertEqual((move("next").step, move("next").moved), (3, False))
+        self.assertEqual(move(1, pid, by="page").step, 1)
+        with self.assertRaises(ValueError):
+            move("sideways")
+        self.assertEqual([(e["step"], e.get("by")) for e in self.events("popover_step")],
+                         [(2, None), (3, None), (3, None), (1, "page")])
+
+    def test_voice_moves_the_top_steps_popover(self):
+        first, second = self.open(), self.open()
+        self.session.show_popover("annotated-image", "x", {"capture": 1, "annotations": [BOX]})  # not steps
+        self.assertEqual(self.session.step_popover("next").id, second)
+        self.session.raise_popover(first)
+        self.assertEqual(self.session.step_popover("next").id, first)
+        self.session.dismiss_popovers("all")
+        self.assertIsNone(self.session.step_popover("next"))
+        self.assertIsNone(self.session.step_popover(2, first))
+
+    def test_the_agent_hears_which_step_is_showing(self):
+        self.assertIsNone(self.session._on_screen())
+        pid = self.open()
+        self.assertEqual(self.session._on_screen(), f"[On the user's screen: steps popover {pid}, at step 1 of 3: Power.]")
+        self.session.step_popover(3)
+        self.assertIn("at step 3 of 3 (the last): Switch.", self.session._on_screen())
+        self.session.dismiss_popovers()
+        self.assertIsNone(self.session._on_screen())
+
+
+class StepsVoiceTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.session = LiveSession(None, CaptureBudget(), Path(tempfile.mkdtemp()), model="test")
+        self.session._capture_log.add(capture())
+        self.voice = self.session.voice = LiveVoice(self.session, VoiceOptions())
+        self.voice.read_out = mock.Mock()
+        self.asked = []
+
+        async def ask(text, *, voice=False):
+            self.asked.append(text)
+        self.session.ask = ask
+
+    async def asyncTearDown(self):
+        self.session._log.close()
+
+    async def say(self, action: str, said: str) -> None:
+        if (pending := self.voice.actions[action](said)) is not None:
+            await pending
+
+    @mock.patch("agent_eyes.web.voice.chime")
+    async def test_steps(self, chime):
+        await self.say("next_step", "done")  # no steps open: it's for the agent
+        self.session.show_popover("steps", "Wire it", {"steps": [step("Power", BOX), step("Ground", CIRCLE)]})
+        await self.say("previous_step", "back")
+        await self.say("next_step", "next")
+        await self.say("repeat_step", "say again")
+        await self.say("next_step", "done")  # past the last step: for the agent too
+        self.assertEqual(self.asked, ["done", "done"])
+        self.assertEqual([c.args[0] for c in self.voice.read_out.call_args_list], ["Step 2, the last one. Do Ground."] * 2)
+        self.assertIn("already at step 1 of 2", [e.get("text") for e in self.session.events_after(0)])
+        self.assertEqual([c.args[0] for c in chime.call_args_list], ["Pop", "Bottle", "Pop", "Pop", "Pop"])
 
 
 class NewConversationTest(unittest.IsolatedAsyncioTestCase):
