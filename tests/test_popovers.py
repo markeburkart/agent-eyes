@@ -5,6 +5,7 @@ Run with: uv run python -m unittest discover tests
 """
 
 import json
+import re
 import tempfile
 import unittest
 from datetime import datetime
@@ -58,13 +59,50 @@ class RenderSvgTest(unittest.TestCase):
     def test_svg(self):
         anns = parse_annotations([BOX, {"shape": "arrow", "x1": 0.9, "y1": 0.9, "x2": 0.6, "y2": 0.6},
                                   {"shape": "text", "x": 0.1, "y": 0.1, "label": "<b>&"}])
-        svg = render_svg(b"img", "image/jpeg", 640, 480, anns)
-        self.assertIn('viewBox="0 0 640 480"', svg)
-        self.assertIn('href="data:image/jpeg;base64,aW1n"', svg)
-        self.assertIn('<rect x="64.0" y="96.0" width="192.0" height="192.0"', svg)
-        self.assertIn(">pin 5</text>", svg)
-        self.assertIn("&lt;b&gt;&amp;", svg)  # labels are escaped
-        self.assertIn("<polygon", svg)
+        r = render_svg(b"img", "image/jpeg", 640, 480, anns)
+        self.assertEqual(r.width, 640)
+        self.assertGreater(r.height, 480)  # room for the labels above the photo
+        self.assertIn(f'viewBox="0 0 640 {r.height}"', r.svg)
+        self.assertIn('href="data:image/jpeg;base64,aW1n"', r.svg)
+        self.assertIn('<rect x="64.0" y="96.0" width="192.0" height="192.0"', r.svg)
+        self.assertIn(">pin 5</text>", r.svg)
+        self.assertIn("&lt;b&gt;&amp;", r.svg)  # labels are escaped
+        self.assertIn("<polygon", r.svg)
+
+    def test_no_labels_no_bands(self):
+        r = render_svg(b"img", "image/jpeg", 640, 480, parse_annotations([{**BOX, "label": ""}]))
+        self.assertEqual((r.width, r.height), (640, 480))
+
+    def test_labels_go_beside_the_photo(self):
+        # Close-together pins, as in a real capture where every label used to land on the same spot.
+        anns = parse_annotations([
+            {"shape": "circle", "x": 0.552, "y": 0.085, "w": 0.022, "h": 0.04, "label": "SDA to GP4 (pin 6)"},
+            {"shape": "circle", "x": 0.538, "y": 0.13, "w": 0.022, "h": 0.04},
+            {"shape": "text", "x": 0.43, "y": 0.02, "label": "SCL to GP5 (pin 7, magenta)"},
+            {"shape": "circle", "x": 0.524, "y": 0.085, "w": 0.022, "h": 0.04, "label": "GND (pin 8)"},
+            {"shape": "box", "x": 0.575, "y": 0.61, "w": 0.025, "h": 0.12, "label": "SCL SDA VCC GND header"},
+            {"shape": "box", "x": 0.535, "y": 0.57, "w": 0.04, "h": 0.05, "label": "Mode switch: set to I2C"},
+            {"shape": "arrow", "x1": 0.1, "y1": 0.9, "x2": 0.2, "y2": 0.8, "label": "from here"},
+        ])
+        W, H = 1280, 720
+        r = render_svg(b"img", "image/jpeg", W, H, anns)
+        # Chips, in the photo's coordinates (the group is moved down by the top band).
+        chips = [tuple(map(float, c)) for c in
+                 re.findall(r'<rect x="([-\d.]+)" y="([-\d.]+)" width="([\d.]+)" height="([\d.]+)" rx="[\d.]+" fill="#', r.svg)]
+        chips = [(x, y, x + w, y + h) for x, y, w, h in chips]
+        self.assertEqual(len(chips), 6)
+        top = float(re.search(r'translate\(0 ([\d.]+)\)', r.svg)[1])
+        for i, a in enumerate(chips):
+            self.assertTrue(0 <= a[0] and a[2] <= W + 0.1, a)
+            self.assertTrue(a[3] <= 0 or a[1] >= H, f"{a} is on the photo")
+            self.assertTrue(-top <= a[1] and a[3] <= r.height - top + 0.1, f"{a} is off the picture")
+            for b in chips[i + 1:]:
+                self.assertTrue(a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1], (a, b))
+
+    def test_long_label_is_squeezed_into_a_narrow_picture(self):
+        r = render_svg(b"img", "image/jpeg", 480, 640, parse_annotations([{**BOX, "label": "x" * 60}]))
+        self.assertIn('<rect x="0.0" y="-41.5" width="480.0"', r.svg)
+        self.assertIn('lengthAdjust="spacingAndGlyphs">' + "x" * 60, r.svg)
 
 
 class PopoverSessionTest(unittest.TestCase):
@@ -87,7 +125,7 @@ class PopoverSessionTest(unittest.TestCase):
         [e] = self.events("popover")
         self.assertEqual((e["id"], e["kind"], e["title"]), (pid, "annotated-image", "The red wire"))
         p = e["payload"]
-        self.assertEqual((p["capture"], p["source"], p["width"], p["height"], p["caption"]), (2, "002-inspect", 300, 200, "goes to pin 5"))
+        self.assertEqual((p["capture"], p["source"], p["width"], p["height"], p["caption"]), (2, "002-inspect", 300, 200 + 38, "goes to pin 5"))  # + the label band
         name = p["image"].rsplit("/", 1)[1]
         self.assertEqual(name, f"002-inspect-{pid}.svg")
         mime, svg = self.session.file(name)

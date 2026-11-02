@@ -236,11 +236,13 @@ class LiveSession:
         annotations = parse_annotations(payload.get("annotations"))
         cid = self._cid(number, cap.detail)
         name = f"{cid}-{pid}.svg"
-        svg = render_svg(cap.image, cap.mime, cap.width, cap.height, annotations).encode()
+        rendered = render_svg(cap.image, cap.mime, cap.width, cap.height, annotations)
+        svg = rendered.svg.encode()
         (self.out_dir / name).write_bytes(svg)
         self._popover_files[name] = ("image/svg+xml", svg)
+        # The picture's size, labels included, so the page can lay it out before it loads.
         return {"capture": number, "source": cid, "annotations": annotations, "caption": str(payload.get("caption") or ""),
-                "image": f"/api/session/files/{name}", "width": cap.width, "height": cap.height}
+                "image": f"/api/session/files/{name}", "width": rendered.width, "height": rendered.height}
 
     # ---- readers -------------------------------------------------------------
 
