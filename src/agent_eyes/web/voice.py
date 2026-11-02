@@ -4,8 +4,10 @@ Spoken requests go to the LiveSession like typed ones. The page shows the voice 
 `summary()` big enough to read from the bench: off, starting, idle (waiting for the wake word),
 dictating, answering (the agent is working on a request or reading its reply out) or live
 (follow-ups need no wake word), with the seconds left before a live conversation closes, and a
-button to close it (`end_conversation()`, like saying "ok thanks"). Saying "new conversation"
-(CLEAR_PHRASES) clears the agent's context like the page's New conversation button. Each
+button to close it (`end_conversation()`, like saying "ok thanks"). Spoken actions (ACTIONS) are
+carried out by the handlers in `actions`: "new conversation" clears the agent's context like the
+page's New conversation button, "dismiss" / "dismiss all" closes the popover on top / all popovers,
+like their × buttons. Each
 change is also a session event, so the page's long poll picks it up at once. The same sounds as
 in the terminal chat play.
 """
@@ -15,14 +17,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..voice import (
-    CLEAR_PHRASES,
+    ACTIONS,
     DEFAULT_WAKE_WORDS,
+    Action,
     Cancelled,
-    ClearContext,
     Command,
     ConversationEnded,
     ConversationOpened,
@@ -73,6 +76,12 @@ class LiveVoice:
         self._listen_task: asyncio.Task | None = None
         self._restart_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
+        self.actions: dict[str, Callable[[], None]] = {
+            "new_conversation": self.new_conversation,
+            "dismiss": lambda: self.dismiss(all=False),
+            "dismiss_all": lambda: self.dismiss(all=True),
+        }
+        """Handlers for the spoken actions (voice ACTIONS) the dashboard carries out, by name."""
 
     async def set(self, *, listening: bool | None = None, speaking: bool | None = None) -> None:
         """Switches voice commands and/or speech on or off, starting voicesvc the first time either is on."""
@@ -159,6 +168,22 @@ class LiveVoice:
             self.dictating = False
             self.session.push("voice")
 
+    def new_conversation(self) -> None:
+        chime("Pop")
+
+        async def restart() -> None:
+            await self.hush()
+            await self.session.restart()
+        # Restarting the agent takes a few seconds; keep listening meanwhile.
+        self._restart_task = asyncio.create_task(restart())
+
+    def dismiss(self, *, all: bool) -> None:
+        """Closes the popover on top, or all of them."""
+        closed = self.session.dismiss_popovers("all" if all else "top")
+        chime("Pop" if closed else "Bottle")
+        n = len(closed)
+        self.session.push("voice", text=f"dismissed {n} popover{'s' * (n != 1)}" if n else "no popover to dismiss")
+
     async def say(self, text: str) -> None:
         if self.speaking and self._helper:
             await self._helper.speak(text)
@@ -179,8 +204,8 @@ class LiveVoice:
         o = self.options
         push = self.session.push
         try:
-            async for event in voice_commands(helper, o.wake_words, focus=self.focus, clear_phrases=CLEAR_PHRASES,
-                                              pause=o.pause):
+            async for event in voice_commands(helper, o.wake_words, focus=self.focus,
+                                              actions={name: ACTIONS[name] for name in self.actions}, pause=o.pause):
                 if isinstance(event, (WakeHeard, FollowUpHeard)):
                     if isinstance(event, WakeHeard):
                         chime("Tink")
@@ -197,13 +222,9 @@ class LiveVoice:
                     except RuntimeError as e:
                         chime("Bottle")
                         push("status", text=f'not sent ({e}), please repeat: "{event.text}"', error=True)
-                elif isinstance(event, ClearContext):
-                    if not self.listening:
-                        continue
-                    chime("Pop")
-                    await self.hush()
-                    # Restarting the agent takes a few seconds; keep listening meanwhile.
-                    self._restart_task = asyncio.create_task(self.session.restart())
+                elif isinstance(event, Action):
+                    if self.listening:  # otherwise cut off by switching voice commands off
+                        self.actions[event.name]()
                 elif isinstance(event, ConversationOpened):
                     push("voice", text=f"conversation live: follow up without the wake word; closes after "
                                        f"{self.focus.seconds:g} s of quiet or when you say \"ok thanks\" or \"that's all\"")

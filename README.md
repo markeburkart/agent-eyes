@@ -29,6 +29,14 @@ The dashboard shows:
   tab title shows "● Agent Eyes: conversation live" too). "End conversation" closes it (or drops a
   request being dictated), like saying "ok thanks". Its switches turn voice commands and
   reading replies out on and off; spoken requests show in the conversation with a 🎙
+- popovers: when something is easier to show than to say, the agent marks up one of its captures
+  (boxes, circles, arrows and short labels) and it opens in a popover over the dashboard. Drag a
+  popover by its title bar; clicking one brings it to the front; × closes it. Several can be open
+  at once. Say "dismiss" (or "dismiss that") to close the one on top (the newest or the one
+  clicked last), or "dismiss all" (or "dismiss everything") to close them all; like any request,
+  that needs "hey eyes" unless the conversation is live. New conversation closes them too. Each
+  annotated capture is saved as an SVG next to the capture (`003-inspect-p2.svg`), and its marks
+  are in `transcript.jsonl`
 - New conversation (the agent forgets everything said so far; or say "hey eyes, new
   conversation", "start over" or "clear context") and Shut down (stops the agent, voice and
   camera helper and exits, like Ctrl-C)
@@ -95,11 +103,23 @@ uv run agent-eyes chat --voice --follow-up 60          # keep conversations open
 ```
 src/agent_eyes/
   cli.py           the agent-eyes command
-  agent/           Claude Agent SDK session (session.py), capture_frame tool (tools.py), capture budget (budget.py)
+  agent/           Claude Agent SDK session (session.py), capture_frame and annotate_capture tools (tools.py),
+                   annotations rendered to SVG (annotate.py), capture budget (budget.py)
   camera/          camera abstraction (base.py) and the camsvc-backed source (continuity.py)
-  voice/           voicesvc (helper.py), wake word + dictation (commands.py), readout echo filter (echo.py)
+  voice/           voicesvc (helper.py), wake word + dictation and spoken actions (commands.py), readout echo filter (echo.py)
   web/             local web server (server.py), the agent session behind the dashboard (live.py), pages (static/)
 camera-service/    camsvc: Swift helper that owns the cameras (built automatically on launch)
 voice-service/     voicesvc: Swift helper for on-device transcription and speech (built when voice is first used)
 spike/             Phase 1 Continuity Camera capability probe
 ```
+
+## Extending
+
+- Voice commands: the spoken actions ("new conversation", "dismiss", "dismiss all") are the
+  `ACTIONS` table in `voice/commands.py`, phrases by name. Add an entry there and a handler with
+  the same name in `LiveVoice.actions` (`web/voice.py`); edit the phrases to change what's said.
+- Popovers: the page draws each kind of popover with a renderer in `POPOVER_RENDERERS`
+  (`web/static/agent.html`); the window around it (drag, ×, stacking, "dismiss") is the same for
+  all. Open one with `LiveSession.show_popover(kind, title, payload)` or
+  `POST /api/session/popovers`. If the server must check or prepare the payload first (as
+  `annotated-image` does, rendering the SVG), add a step to `POPOVER_KINDS` in `web/live.py`.

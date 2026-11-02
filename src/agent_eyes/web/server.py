@@ -6,6 +6,11 @@
 
 POST /api/shutdown stops everything, like Ctrl-C.
 
+Popovers on the dashboard: POST /api/session/popovers {kind, title, payload} opens one (what the
+agent's annotate_capture does), /api/session/popovers/dismiss {which: "top" | "all" | id} closes
+them (the page's ×, the voice command "dismiss"), /api/session/popovers/raise {id} records that the
+page brought one to the front.
+
 The agent runs in a LiveSession on the backend's event loop, with voice commands and replies read
 out (LiveVoice) in this process too, so the page can show the voice state. Manual captures go through the
 CameraSource (same detail levels as the agent); previews, status and events are proxied straight
@@ -137,8 +142,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(400, {"error": "bad_request", "message": "after and wait must be numbers"})
             events = self.backend.session.events_after(after, wait)
             self._json(200, {"events": events, "session": self.backend.session_summary()})
-        elif url.path.startswith("/api/session/captures/"):
-            img = self.backend.session.image(url.path.rsplit("/", 1)[1])
+        elif url.path.startswith(("/api/session/captures/", "/api/session/files/")):
+            session, name = self.backend.session, url.path.rsplit("/", 1)[1]
+            img = session.image(name) if url.path.startswith("/api/session/captures/") else session.file(name)
             if img:
                 self._send(200, img[0], img[1])
             else:
@@ -183,6 +189,18 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/session/voice/end":
             self.backend.call(self.backend.session.voice.end_conversation)
             self._json(200, self.backend.session_summary())
+        elif self.path == "/api/session/popovers":
+            try:
+                pid = self.backend.call(self.backend.session.show_popover, str(body.get("kind", "")),
+                                        str(body.get("title", "")), body.get("payload"))
+            except (TypeError, ValueError) as e:
+                return self._json(400, {"error": "bad_request", "message": str(e)})
+            self._json(200, {"id": pid})
+        elif self.path == "/api/session/popovers/dismiss":
+            self._json(200, {"closed": self.backend.call(self.backend.session.dismiss_popovers, str(body.get("which", "top")))})
+        elif self.path == "/api/session/popovers/raise":
+            self.backend.call(self.backend.session.raise_popover, str(body.get("id", "")))
+            self._json(200, {"ok": True})
         elif self.path == "/api/shutdown":
             # Like Ctrl-C: serve() then stops the agent, voice and camera, and the process exits.
             print("shutting down (from the dashboard)", flush=True)

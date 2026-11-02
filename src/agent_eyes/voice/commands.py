@@ -13,8 +13,11 @@ Replies are read out with the mic still on. While the assistant is speaking, dic
 and its own words are filtered out of what the mic hears (`Echo`); saying "stop" or "ok" cuts
 the readout short, and "ok thanks" (or any other closing phrase) also closes the conversation.
 
-With `clear_phrases` (e.g. CLEAR_PHRASES), a request that is nothing but one of them ("hey eyes,
-new conversation") yields ClearContext instead of a Command.
+Spoken actions: a request that is nothing but one of an action's phrases ("hey eyes, new
+conversation", "dismiss") yields Action(name) instead of a Command, for the app to carry out
+rather than send to the agent. ACTIONS lists them; voice_commands only knows the ones it's given
+(`actions`), so each app picks those it can handle. Like any request, an action needs the wake word
+unless the conversation is live, and isn't heard while a reply is being read out.
 """
 
 from __future__ import annotations
@@ -22,19 +25,36 @@ from __future__ import annotations
 import math
 import re
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
 from .echo import Echo
 from .helper import Transcript
 
+# ---- what can be said -----------------------------------------------------------
+# Phrases are lowercase words; what's heard is matched ignoring case and punctuation.
+
 DEFAULT_WAKE_WORDS = ("hey eyes", "hey ice", "hi eyes")
-CANCEL_PHRASES = ("never mind", "nevermind", "cancel")
-END_PHRASES = ("that's all", "that is all", "stop listening", "goodbye",
-               "ok thanks", "okay thanks", "ok thank you", "okay thank you")
-CLEAR_PHRASES = ("new conversation", "start over", "clear context")
-INTERRUPT_WORDS = ("stop", "ok", "skip")
+
+# Conversation control, built into voice_commands.
+CANCEL_PHRASES = ("never mind", "nevermind", "cancel")  # a request ending with one is dropped
+END_PHRASES = ("that's all", "that is all", "stop listening", "goodbye",  # a request ending with one closes the
+               "ok thanks", "okay thanks", "ok thank you", "okay thank you")  # conversation (also during a readout)
+INTERRUPT_WORDS = ("stop", "ok", "skip")  # cut a readout short
+
+# Spoken actions, by name: a request that is exactly one of the phrases yields Action(name).
+# To add a command, add an entry here and a handler with the same name where voice_commands runs
+# (the dashboard's LiveVoice.actions); to change what's said for one, edit its phrases.
+ACTIONS: dict[str, tuple[str, ...]] = {
+    # The agent forgets the conversation so far.
+    "new_conversation": ("new conversation", "start over", "clear context"),
+    # Close the popover on top (the one opened or clicked last).
+    "dismiss": ("dismiss", "dismissed", "dismiss it", "dismiss that", "dismiss this"),
+    # Close every popover. "Dismissal" is how the recognizer can hear "dismiss all".
+    "dismiss_all": ("dismiss all", "dismissal", "dismiss all of them", "dismiss them all", "dismiss them",
+                    "dismiss everything"),
+}
 _FILLER = " ,.;:!?-"
 _HESITATIONS = {"um", "uh", "hmm", "mm", "ah", "er", "oh"}
 
@@ -110,8 +130,10 @@ class Command:
 
 
 @dataclass(frozen=True)
-class ClearContext:
-    """The user asked to start over: the agent should forget the conversation so far."""
+class Action:
+    """The request was one of the phrases of action `name` (see ACTIONS), for the app to carry out."""
+
+    name: str
 
 
 @dataclass(frozen=True)
@@ -139,24 +161,36 @@ class Interrupted:
     word: str
 
 
-VoiceEvent = WakeHeard | FollowUpHeard | Command | ClearContext | Cancelled | ConversationOpened | ConversationEnded | Interrupted
+VoiceEvent = (WakeHeard | FollowUpHeard | Command | Action | Cancelled | ConversationOpened | ConversationEnded
+              | Interrupted)
 
 
 def _words(text: str) -> list[re.Match[str]]:
     return list(re.finditer(r"[a-z0-9']+", text.lower()))
 
 
-def after_wake_word(text: str, wake_words: tuple[str, ...]) -> str | None:
-    """What was said after the last wake word in `text` (ignoring case and punctuation), or None if there is none."""
-    words = _words(text)
-    spoken = [m.group() for m in words]
+def _wake_end(text: str, wake_words: tuple[str, ...]) -> int | None:
+    """How many words of `text` there are up to the end of the last wake word, or None if there is none."""
+    spoken = [m.group() for m in _words(text)]
     end = None
     for phrase in wake_words:
         target = phrase.lower().split()
         for i in range(len(spoken) - len(target) + 1):
-            if spoken[i : i + len(target)] == target and (end is None or words[i + len(target) - 1].end() > end):
-                end = words[i + len(target) - 1].end()
-    return None if end is None else text[end:].strip(_FILLER)
+            if spoken[i : i + len(target)] == target and (end is None or i + len(target) > end):
+                end = i + len(target)
+    return end
+
+
+def _after_words(text: str, n: int) -> str:
+    """`text` without its first `n` words."""
+    words = _words(text)
+    return text[words[n - 1].end():].strip(_FILLER) if n else text.strip(_FILLER)
+
+
+def after_wake_word(text: str, wake_words: tuple[str, ...]) -> str | None:
+    """What was said after the last wake word in `text` (ignoring case and punctuation), or None if there is none."""
+    end = _wake_end(text, wake_words)
+    return None if end is None else _after_words(text, end)
 
 
 def _ends_with(command: str, phrases: tuple[str, ...]) -> bool:
@@ -173,9 +207,10 @@ def is_end(command: str) -> bool:
     return _ends_with(command, END_PHRASES)
 
 
-def is_clear(command: str, phrases: tuple[str, ...] = CLEAR_PHRASES) -> bool:
-    """The whole request is a clear phrase ("let's start over with pin five" is a request)."""
-    return " ".join(m.group() for m in _words(command)) in phrases
+def action_for(command: str, actions: Mapping[str, tuple[str, ...]] = ACTIONS) -> str | None:
+    """The action whose phrase is the whole request, if any ("let's start over with pin five" is a request)."""
+    spoken = " ".join(m.group() for m in _words(command))
+    return next((name for name, phrases in actions.items() if spoken in phrases), None)
 
 
 def is_hesitation(text: str) -> bool:
@@ -188,7 +223,7 @@ async def voice_commands(
     wake_words: tuple[str, ...] = DEFAULT_WAKE_WORDS,
     *,
     focus: Focus | None = None,
-    clear_phrases: tuple[str, ...] = (),
+    actions: Mapping[str, tuple[str, ...]] | None = None,
     pause: float = 1.5,
     wait_for_command: float = 8.0,
     finalize_wait: float = 2.0,
@@ -196,8 +231,8 @@ async def voice_commands(
     """Yields WakeHeard when the wake word is spoken, then a Command once the speaker pauses for
     `pause` seconds, or Cancelled. Speech without the wake word is ignored unless `focus` is active
     (then it yields FollowUpHeard and dictation starts);
-    yields ConversationOpened and ConversationEnded as focus comes and goes, and ClearContext for a
-    request that is one of `clear_phrases`. While `source.echo` is
+    yields ConversationOpened and ConversationEnded as focus comes and goes, and Action for a request
+    that is one of the phrases in `actions` (name -> phrases, e.g. from ACTIONS). While `source.echo` is
     active only interrupt words count; yields Interrupted after stopping the readout."""
     focus = focus or Focus(0)
     settled = ""  # final transcript text since the last command
@@ -208,11 +243,15 @@ async def voice_commands(
     in_echo = False  # the assistant is (or just was) speaking: listen only for interrupt words
     interrupted = False
     closed = False  # a closing phrase was heard during this readout
+    woke_at: int | None = None  # words up to the end of the wake word that started this dictation
     echo = source.echo
 
     def request_text() -> str:
         heard = settled + volatile
         command = after_wake_word(heard, wake_words)
+        if command is None and woke_at and len(_words(heard)) > woke_at:
+            # The recognizer revised the wake word away ("hey eyes" became "hey, guys"): drop it anyway.
+            return _after_words(heard, woke_at)
         return heard.strip(_FILLER) if command is None else command
 
     while True:
@@ -271,9 +310,9 @@ async def voice_commands(
             elif is_cancel(command):
                 focus.extend()
                 yield Cancelled("cancelled", command)
-            elif is_clear(command, clear_phrases):
+            elif name := action_for(command, actions or {}):
                 focus.start()
-                yield ClearContext()
+                yield Action(name)
             elif not is_hesitation(command):
                 focus.start()
                 yield Command(command)
@@ -317,7 +356,7 @@ async def voice_commands(
                     yield Interrupted(word)
             continue
         if not dictating:
-            if after_wake_word(settled + volatile, wake_words) is not None:
+            if (woke_at := _wake_end(settled + volatile, wake_words)) is not None:
                 dictating = True
                 yield WakeHeard()
             elif focus.active and (settled + volatile).strip(_FILLER):

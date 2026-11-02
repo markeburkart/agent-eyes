@@ -1,5 +1,6 @@
-"""Closing a voice conversation (the closing phrases, "ok thanks" etc., and Focus.close()) and
-clearing the agent's context ("new conversation").
+"""Closing a voice conversation (the closing phrases, "ok thanks" etc., and Focus.close()) and the
+spoken actions: clearing the agent's context ("new conversation") and dismissing popovers ("dismiss",
+"dismiss all").
 
 Run with: uv run python -m unittest discover tests
 """
@@ -8,8 +9,8 @@ import unittest
 from collections.abc import Callable
 
 from agent_eyes.voice.commands import (
-    CLEAR_PHRASES,
-    ClearContext,
+    ACTIONS,
+    Action,
     Command,
     ConversationEnded,
     ConversationOpened,
@@ -17,7 +18,7 @@ from agent_eyes.voice.commands import (
     FollowUpHeard,
     Interrupted,
     WakeHeard,
-    is_clear,
+    action_for,
     is_end,
     voice_commands,
 )
@@ -67,10 +68,10 @@ class FakeSource:
             self.echo.done()
 
 
-async def run(source: FakeSource, focus: Focus, clear_phrases: tuple[str, ...] = ()) -> list:
+async def run(source: FakeSource, focus: Focus, actions: dict[str, tuple[str, ...]] | None = None) -> list:
     events = []
     try:
-        async for event in voice_commands(source, focus=focus, clear_phrases=clear_phrases):
+        async for event in voice_commands(source, focus=focus, actions=actions):
             events.append(event)
     except Done:
         pass
@@ -98,16 +99,34 @@ class IsEndTest(unittest.TestCase):
                 self.assertFalse(is_end(said))
 
 
-class IsClearTest(unittest.TestCase):
-    def test_clear_phrases(self):
+class ActionForTest(unittest.TestCase):
+    def test_new_conversation(self):
         for said in ("new conversation", "New conversation.", "start over", "clear context"):
             with self.subTest(said=said):
-                self.assertTrue(is_clear(said))
+                self.assertEqual(action_for(said), "new_conversation")
 
-    def test_request_mentioning_a_clear_phrase_is_not_one(self):
-        for said in ("let's start over with pin five", "is this a new conversation", "start over the soldering"):
+    def test_dismiss_closes_the_top_one(self):
+        for said in ("dismiss", "Dismiss.", "dismiss that", "dismiss it", "Dismissed!"):
             with self.subTest(said=said):
-                self.assertFalse(is_clear(said))
+                self.assertEqual(action_for(said), "dismiss")
+
+    def test_dismiss_all(self):
+        for said in ("dismiss all", "Dismiss all.", "Dismissal.", "dismiss everything", "dismiss them all", "dismiss all of them"):
+            with self.subTest(said=said):
+                self.assertEqual(action_for(said), "dismiss_all")
+
+    def test_request_mentioning_a_phrase_is_not_an_action(self):
+        for said in ("let's start over with pin five", "is this a new conversation", "start over the soldering",
+                     "dismiss the red wire", "should I dismiss this warning", "what does dismiss mean", "close it"):
+            with self.subTest(said=said):
+                self.assertIsNone(action_for(said))
+
+    def test_only_the_actions_given(self):
+        self.assertIsNone(action_for("dismiss", {"new_conversation": ACTIONS["new_conversation"]}))
+
+    def test_phrases_are_unique(self):
+        phrases = [p for ps in ACTIONS.values() for p in ps]
+        self.assertEqual(len(phrases), len(set(phrases)))
 
 
 class ConversationTest(unittest.IsolatedAsyncioTestCase):
@@ -182,13 +201,45 @@ class ConversationTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_new_conversation_after_wake_word(self):
         self.focus.end()
-        events = await run(FakeSource(self.clock, [heard("hey eyes, new conversation"), None]), self.focus, CLEAR_PHRASES)
-        self.assertEqual(events, [WakeHeard(), ClearContext(), ConversationOpened()])
+        events = await run(FakeSource(self.clock, [heard("hey eyes, new conversation"), None]), self.focus, ACTIONS)
+        self.assertEqual(events, [WakeHeard(), Action("new_conversation"), ConversationOpened()])
         self.assertTrue(self.focus.active)
 
-    async def test_new_conversation_is_a_request_without_clear_phrases(self):
+    async def test_new_conversation_is_a_request_without_actions(self):
         events = await run(FakeSource(self.clock, [heard("new conversation"), None]), self.focus)
         self.assertEqual(events, [ConversationOpened(), FollowUpHeard(), Command("new conversation")])
+
+    async def test_dismiss_after_wake_word(self):
+        self.focus.end()
+        events = await run(FakeSource(self.clock, [heard("hey eyes, dismiss"), None]), self.focus, ACTIONS)
+        self.assertEqual(events, [WakeHeard(), Action("dismiss"), ConversationOpened()])
+        self.assertTrue(self.focus.active)
+
+    async def test_wake_word_revised_away(self):
+        # The recognizer heard "hey eyes" (dictation started) but its final text says "hey, guys".
+        self.focus.end()
+        source = FakeSource(self.clock, [heard("hey eyes", False), heard("Hey, guys. Dismiss."), None])
+        events = await run(source, self.focus, ACTIONS)
+        self.assertEqual(events, [WakeHeard(), Action("dismiss"), ConversationOpened()])
+
+    async def test_wake_word_revised_away_in_a_request(self):
+        self.focus.end()
+        source = FakeSource(self.clock, [heard("hey eyes is", False), heard("Hey guys, is the red wire on pin five?"), None])
+        events = await run(source, self.focus)
+        self.assertEqual(events, [WakeHeard(), Command("is the red wire on pin five"), ConversationOpened()])
+
+    async def test_dismiss_all_in_live_conversation(self):
+        events = await run(FakeSource(self.clock, [heard("dismiss all"), None]), self.focus, ACTIONS)
+        self.assertEqual(events, [ConversationOpened(), FollowUpHeard(), Action("dismiss_all")])
+        self.assertTrue(self.focus.active)
+
+    async def test_dismiss_is_a_request_without_actions(self):
+        events = await run(FakeSource(self.clock, [heard("dismiss"), None]), self.focus)
+        self.assertEqual(events, [ConversationOpened(), FollowUpHeard(), Command("dismiss")])
+
+    async def test_dismiss_in_a_sentence_goes_to_the_agent(self):
+        events = await run(FakeSource(self.clock, [heard("dismiss the box on the left"), None]), self.focus, ACTIONS)
+        self.assertEqual(events, [ConversationOpened(), FollowUpHeard(), Command("dismiss the box on the left")])
 
 
 if __name__ == "__main__":
