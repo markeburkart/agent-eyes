@@ -33,6 +33,7 @@ from .voice import (
     Focus,
     FollowUpHeard,
     Interrupted,
+    SlowedDown,
     VoiceError,
     VoiceHelper,
     WakeHeard,
@@ -355,6 +356,8 @@ async def listen(controls: VoiceControls, voice: VoiceHelper, requests: asyncio.
                       "or when you say \"ok thanks\" or \"that's all\"]", flush=True)
             elif isinstance(event, Interrupted):
                 print(f'  [readout stopped: you said "{event.word}"]', flush=True)
+            elif isinstance(event, SlowedDown):
+                print("  [speaking more slowly]", flush=True)
             elif isinstance(event, ConversationEnded):
                 if controls.listening:  # otherwise /voice off closed it
                     chime("Submarine")

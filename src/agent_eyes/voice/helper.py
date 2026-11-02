@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -14,6 +15,11 @@ from .echo import Echo, spoken_words
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_BINARY = REPO_ROOT / "voice-service" / ".build" / "release" / "voicesvc"
+
+# Speaking rates, on AVSpeechUtterance's 0..1 scale: each "slow down" multiplies by the step.
+DEFAULT_RATE = 0.5
+SLOW_DOWN_STEP = 0.8
+MIN_RATE = 0.2
 
 
 class VoiceError(Exception):
@@ -67,7 +73,10 @@ class VoiceHelper:
         one-time speech model download."""
         self.echo = Echo()
         self.mic_on = False
+        self.rate = DEFAULT_RATE
         self._utterances: dict[int, int] = {}  # id -> words of it already added to echo
+        self._texts: dict[int, str] = {}  # id -> its text, until it's spoken
+        self._reached: dict[int, int] = {}  # id -> characters of its text read out so far (up to the current word)
         self._next_id = 0
         self._binary = Path(binary or os.environ.get("AGENT_EYES_VOICESVC", DEFAULT_BINARY))
         self._args: list[str] = []
@@ -139,12 +148,29 @@ class VoiceHelper:
             return
         self._next_id += 1
         self._utterances[self._next_id] = 0
+        self._texts[self._next_id] = text
         self.echo.begin()
         await self._send(f"speak {self._next_id} {text}")
 
     async def stop_speaking(self) -> None:
         """Cuts off the readout, including anything still queued."""
         await self._send("stop_speaking")
+
+    async def slow_down(self) -> None:
+        """Speaks more slowly from now on (a step at a time, down to MIN_RATE). A readout in progress
+        starts again from the beginning of the sentence it's in, at the new rate."""
+        self.rate = max(MIN_RATE, round(self.rate * SLOW_DOWN_STEP, 3))
+        await self._send(f"rate {self.rate}")
+        if not (queued := sorted(self._texts)):
+            return
+        current = self._texts[queued[0]]
+        reached = current[: self._reached.get(queued[0], 0)]
+        start = max((m.end() for m in re.finditer(r"[.!?]\s+", reached)), default=0)
+        rest = [current[start:]] + [self._texts.pop(i) for i in queued[1:]]
+        del self._texts[queued[0]]  # cut off below; not to be read out again by another slow_down
+        await self.stop_speaking()
+        for text in rest:
+            await self.speak(text)
 
     async def set_mic(self, on: bool) -> None:
         """Opens or closes the microphone. `mic_on` follows once the helper confirms."""
@@ -165,7 +191,10 @@ class VoiceHelper:
                 words = spoken_words(event["spoken"])
                 self.echo.spoke(words[self._utterances[event["id"]] :])
                 self._utterances[event["id"]] = len(words)
+                self._reached[event["id"]] = len(event["spoken"])
             elif event["event"] == "spoken" and self._utterances.pop(event["id"], None) is not None:
+                self._texts.pop(event["id"], None)
+                self._reached.pop(event["id"], None)
                 self.echo.done()
             elif event["event"] == "mic":
                 self.mic_on = event["on"]
