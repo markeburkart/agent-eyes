@@ -1,6 +1,6 @@
 """Closing a voice conversation (the closing phrases, "ok thanks" etc., and Focus.close()) and the
 spoken actions: clearing the agent's context ("new conversation") and dismissing popovers ("dismiss",
-"dismiss all").
+"dismiss all"); and "slow down" during a readout or as a request.
 
 Run with: uv run python -m unittest discover tests
 """
@@ -17,6 +17,7 @@ from agent_eyes.voice.commands import (
     Focus,
     FollowUpHeard,
     Interrupted,
+    SlowedDown,
     WakeHeard,
     action_for,
     is_end,
@@ -47,6 +48,7 @@ class FakeSource:
         self.script = list(script)
         self.echo = echo or Echo(clock=clock)
         self.stopped = 0
+        self.slowed = 0
 
     async def next(self, timeout: float | None = None) -> Transcript | None:
         if not self.script:
@@ -66,6 +68,9 @@ class FakeSource:
         self.stopped += 1
         if self.echo.speaking:
             self.echo.done()
+
+    async def slow_down(self) -> None:
+        self.slowed += 1
 
 
 async def run(source: FakeSource, focus: Focus, actions: dict[str, tuple[str, ...]] | None = None) -> list:
@@ -240,6 +245,38 @@ class ConversationTest(unittest.IsolatedAsyncioTestCase):
     async def test_dismiss_in_a_sentence_goes_to_the_agent(self):
         events = await run(FakeSource(self.clock, [heard("dismiss the box on the left"), None]), self.focus, ACTIONS)
         self.assertEqual(events, [ConversationOpened(), FollowUpHeard(), Command("dismiss the box on the left")])
+
+    async def test_slow_down_during_readout(self):
+        source = FakeSource(self.clock, [heard("the red slow", False), heard("the red slow down", False),
+                                         heard("the red slow down wire is")] + [None] * 8, self.reading_out())
+        events = await run(source, self.focus)
+        self.assertEqual(events, [ConversationOpened(), SlowedDown()])
+        self.assertEqual((source.slowed, source.stopped), (1, 0))
+        self.assertTrue(self.focus.active)
+
+    async def test_slow_down_twice_during_readout(self):
+        source = FakeSource(self.clock, [heard("the red slow down"), heard(" wire slower")] + [None] * 8,
+                            self.reading_out())
+        events = await run(source, self.focus)
+        self.assertEqual(events, [ConversationOpened(), SlowedDown(), SlowedDown()])
+        self.assertEqual(source.slowed, 2)
+
+    async def test_slow_down_in_the_readout_itself_is_ignored(self):
+        echo = self.reading_out()
+        echo.spoke(["slow", "down", "here"])
+        source = FakeSource(self.clock, [heard("the red wire is on pin five slow down here")] + [None] * 8, echo)
+        events = await run(source, self.focus)
+        self.assertEqual(events, [ConversationOpened()])
+        self.assertEqual(source.slowed, 0)
+
+    async def test_slow_down_as_a_request(self):
+        events = await run(FakeSource(self.clock, [heard("Slow down."), None]), self.focus)
+        self.assertEqual(events, [ConversationOpened(), FollowUpHeard(), SlowedDown()])
+        self.assertTrue(self.focus.active)
+
+    async def test_slow_down_in_a_sentence_goes_to_the_agent(self):
+        events = await run(FakeSource(self.clock, [heard("should the solder flow slower"), None]), self.focus)
+        self.assertEqual(events, [ConversationOpened(), FollowUpHeard(), Command("should the solder flow slower")])
 
 
 if __name__ == "__main__":

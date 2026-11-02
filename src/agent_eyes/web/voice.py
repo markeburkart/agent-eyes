@@ -33,6 +33,7 @@ from ..voice import (
     Focus,
     FollowUpHeard,
     Interrupted,
+    SlowedDown,
     VoiceError,
     VoiceHelper,
     WakeHeard,
@@ -265,6 +266,8 @@ class LiveVoice:
                                        f"{self.focus.seconds:g} s of quiet or when you say \"ok thanks\" or \"that's all\"")
                 elif isinstance(event, Interrupted):
                     push("voice", text=f'readout stopped: you said "{event.word}"')
+                elif isinstance(event, SlowedDown):
+                    push("voice", text="speaking more slowly")
                 elif isinstance(event, ConversationEnded):
                     if self.listening:  # otherwise switching voice commands off closed it
                         chime("Submarine")

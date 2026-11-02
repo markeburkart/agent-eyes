@@ -287,11 +287,13 @@ class LiveSession:
         return {"steps": out, "step": 1, "show_earlier": show_earlier}
 
     def _render(self, name: str, cap: Capture, annotations: list[dict]) -> tuple[str, int, int]:
-        """Draws `annotations` over `cap` into SVG file `name` (saved and served); returns (name, width, height)."""
-        svg = render_svg(cap.image, cap.mime, cap.width, cap.height, annotations).encode()
+        """Draws `annotations` over `cap` into SVG file `name` (saved and served); returns (name, width, height),
+        the picture's size with its label bands, so the page can lay it out before it loads."""
+        rendered = render_svg(cap.image, cap.mime, cap.width, cap.height, annotations)
+        svg = rendered.svg.encode()
         (self.out_dir / name).write_bytes(svg)
         self._popover_files[name] = ("image/svg+xml", svg)
-        return name, cap.width, cap.height
+        return name, rendered.width, rendered.height
 
     # ---- step groups (on the loop) ----------------------------------------------
 
@@ -321,7 +323,7 @@ class LiveSession:
         self.push("popover_step", id=pid, step=step, total=total, **({"by": by} if by else {}))
         s = group["steps"][step - 1]
         if self.voice:
-            self.voice.read_out(f"Step {step}. {s['say']}")
+            self.voice.read_out(f"Step {step}{', the last one' if step == total else ''}. {s['say']}")
         return StepMove(pid, step, total, moved=True)
 
     def _top_steps(self) -> str | None:
