@@ -6,7 +6,12 @@
 // Wake-word and dictation logic live in the Python side.
 //
 // Usage: voicesvc [--locale en-US] [--context "hey eyes,Raspberry Pi"] [--file speech.aiff] [--speech-volume 1] [--mic-off]
+//                 [--voice com.apple.voice.premium.en-US.Ava] [--list-voices]
 //   --locale ID          speech locale for listening and speaking (default: the system locale)
+//   --voice REF          speaking voice: an identifier or a name ("Ava", "Ava (Premium)"); default: the best
+//                        installed natural voice for the locale (premium, then enhanced, then compact; novelty
+//                        and Eloquence voices only when chosen)
+//   --list-voices        print one "voices" event and exit (no speech model or microphone needed)
 //   --context LIST       comma-separated words and phrases to bias recognition towards (e.g. the wake word)
 //   --file PATH          transcribe an audio file played in real time, then silence, instead of the
 //                        microphone (for testing without speaking)
@@ -15,7 +20,13 @@
 //
 // stdout, one JSON object per line:
 //   {"event":"status","message":"..."}                  progress, e.g. a speech model download
-//   {"event":"ready","locale":"en-US"}                  started (preceded by a "mic" event unless --mic-off)
+//   {"event":"ready","locale":"en-US","voice":VOICE,"voices":[VOICE,...]}
+//       started (preceded by a "mic" event unless --mic-off). `voice` is the speaking voice, `voices` the
+//       installed ones for the locale's language (e.g. all en-*), best first, each
+//       VOICE = {"identifier":"...","name":"Ava (Premium)","language":"en-US","quality":"premium|enhanced|compact",
+//                "natural":true}   (natural=false: a novelty or Eloquence voice)
+//   {"event":"voices","locale":"en-US","voice":VOICE,"voices":[...]}   with --list-voices: what "ready" would report
+//   {"event":"voice","voice":VOICE}                     the voice was changed ({"event":"voice","error":"..."} if not)
 //   {"event":"mic","on":true}                           the microphone was opened or closed;
 //       {"event":"mic","on":false,"error":"..."} if it could not be opened (not fatal)
 //   {"event":"text","final":false,"text":"...","start":1.2,"end":2.5}
@@ -31,6 +42,7 @@
 //   speak ID TEXT       queue TEXT (one line) to be spoken as utterance ID
 //   stop_speaking       cut off the current utterance and drop the queued ones (each reports "spoken")
 //   rate R              speaking rate for utterances queued from now on, 0..1 (AVSpeechUtterance's; default 0.5)
+//   voice REF           voice for utterances queued from now on: an identifier or a name (replies with a "voice" event)
 //   mic on|off          open or close the microphone (replies with a "mic" event)
 // The helper exits when stdin closes, so it never outlives its parent. Logs go to stderr.
 
@@ -60,6 +72,8 @@ var contextualStrings: [String] = []
 var audioFile: String?
 var speechVolume: Float = 1
 var micAtStart = true
+var voiceRef: String?
+var listVoices = false
 do {
     var it = CommandLine.arguments.dropFirst().makeIterator()
     while let a = it.next() {
@@ -69,22 +83,92 @@ do {
         case "--file": audioFile = it.next()
         case "--speech-volume": speechVolume = Float(it.next() ?? "") ?? 1
         case "--mic-off": micAtStart = false
+        case "--voice": voiceRef = it.next()
+        case "--list-voices": listVoices = true
         default: log("unknown argument \(a)"); exit(64)
         }
     }
 }
 
+// ---- voices -------------------------------------------------------------------
+
+/// Novelty voices (Bubbles, Zarvox, ...), the old MacinTalk ones and Eloquence's (Eddy, Grandma, ...) sound robotic.
+func isNatural(_ v: AVSpeechSynthesisVoice) -> Bool {
+    !v.voiceTraits.contains(.isNoveltyVoice)
+        && !v.identifier.hasPrefix("com.apple.speech.synthesis.") && !v.identifier.hasPrefix("com.apple.eloquence.")
+}
+
+func qualityName(_ q: AVSpeechSynthesisVoiceQuality) -> String {
+    switch q {
+    case .premium: "premium"
+    case .enhanced: "enhanced"
+    default: "compact"
+    }
+}
+
+func describe(_ v: AVSpeechSynthesisVoice) -> [String: Any] {
+    ["identifier": v.identifier, "name": v.name, "language": v.language, "quality": qualityName(v.quality), "natural": isNatural(v)]
+}
+
+func languageCode(_ bcp47: String) -> String? { Locale(identifier: bcp47).language.languageCode?.identifier }
+
+/// Installed voices for `language`'s language (e.g. all en-* for en-US), best first: natural ones, by quality,
+/// those for `language` itself before other regions, the system's own choice first, then by name.
+func voices(for language: String) -> [AVSpeechSynthesisVoice] {
+    let code = languageCode(language)
+    let systemChoice = AVSpeechSynthesisVoice(language: language)?.identifier
+    return AVSpeechSynthesisVoice.speechVoices()
+        .filter { languageCode($0.language) == code }
+        .sorted { a, b in
+            func key(_ v: AVSpeechSynthesisVoice) -> (Int, Int, Int, Int) {
+                (isNatural(v) ? 0 : 1, -v.quality.rawValue, v.language == language ? 0 : 1, v.identifier == systemChoice ? 0 : 1)
+            }
+            let (ka, kb) = (key(a), key(b))
+            return ka != kb ? ka < kb : a.name.localizedStandardCompare(b.name) == .orderedAscending
+        }
+}
+
+/// The best installed natural voice for `language` itself; the system's choice if there is none.
+func bestVoice(for language: String) -> AVSpeechSynthesisVoice? {
+    voices(for: language).first { isNatural($0) && $0.language == language } ?? AVSpeechSynthesisVoice(language: language)
+}
+
+/// A voice by identifier, or by name ("Ava" or "Ava (Premium)", any case; the best match for `language` first).
+func findVoice(_ ref: String, language: String) -> AVSpeechSynthesisVoice? {
+    if let v = AVSpeechSynthesisVoice(identifier: ref) { return v }
+    let wanted = ref.lowercased()
+    let base = { (name: String) in String(name.split(separator: " (", maxSplits: 1).first ?? "").lowercased() }
+    let candidates = voices(for: language) + AVSpeechSynthesisVoice.speechVoices()
+    return candidates.first { $0.name.lowercased() == wanted } ?? candidates.first { base($0.name) == wanted }
+}
+
+/// The voice to start with: `voiceRef` if given and installed, else the best one for `language`.
+func startingVoice(language: String) -> AVSpeechSynthesisVoice? {
+    if let ref = voiceRef {
+        if let v = findVoice(ref, language: language) { return v }
+        log("voice \(ref) is not installed; using the best one for \(language)")
+    }
+    return bestVoice(for: language)
+}
+
+if listVoices {
+    let language = Locale(identifier: localeID).identifier(.bcp47)
+    emit(["event": "voices", "locale": language, "voice": startingVoice(language: language).map(describe) ?? NSNull(),
+          "voices": voices(for: language).map(describe)])
+    exit(0)
+}
+
 /// Speaks queued utterances and reports their progress word by word.
 final class Speaker: NSObject, AVSpeechSynthesizerDelegate, @unchecked Sendable {
     private let synth = AVSpeechSynthesizer()
-    private let voice: AVSpeechSynthesisVoice?
+    private var voice: AVSpeechSynthesisVoice?
     private let volume: Float
     private let lock = NSLock()
     private var pending: [ObjectIdentifier: Int] = [:]  // utterance -> id, until it reports "spoken"
     private var rate = AVSpeechUtteranceDefaultSpeechRate
 
-    init(language: String, volume: Float) {
-        voice = AVSpeechSynthesisVoice(language: language)
+    init(voice: AVSpeechSynthesisVoice?, volume: Float) {
+        self.voice = voice
         self.volume = volume
         super.init()
         synth.delegate = self
@@ -92,9 +176,9 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate, @unchecked Sendable 
 
     func speak(id: Int, text: String) {
         let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = voice
         utterance.volume = volume
         lock.withLock {
+            utterance.voice = voice
             utterance.rate = rate
             pending[ObjectIdentifier(utterance)] = id
         }
@@ -103,6 +187,11 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate, @unchecked Sendable 
 
     func setRate(_ r: Float) {
         lock.withLock { rate = min(max(r, AVSpeechUtteranceMinimumSpeechRate), AVSpeechUtteranceMaximumSpeechRate) }
+    }
+
+    var currentVoice: AVSpeechSynthesisVoice? {
+        get { lock.withLock { voice } }
+        set { lock.withLock { voice = newValue } }
     }
 
     func stop() {
@@ -299,10 +388,21 @@ func setMic(_ on: Bool) async {
 
 if micAtStart { await setMic(true) }
 
-let speaker = Speaker(language: locale.identifier(.bcp47), volume: speechVolume)
+let language = locale.identifier(.bcp47)
+let speaker = Speaker(voice: startingVoice(language: language), volume: speechVolume)
 
-emit(["event": "ready", "locale": locale.identifier(.bcp47)])
-log("ready (\(locale.identifier), \(audioFile ?? "microphone") \(input.on ? "on" : "off"))")
+emit(["event": "ready", "locale": language, "voice": speaker.currentVoice.map(describe) ?? NSNull(),
+      "voices": voices(for: language).map(describe)])
+log("ready (\(locale.identifier), \(audioFile ?? "microphone") \(input.on ? "on" : "off"), voice \(speaker.currentVoice?.identifier ?? "none"))")
+
+func setVoice(_ ref: String) {
+    guard let v = findVoice(ref, language: language) else {
+        emit(["event": "voice", "error": "voice \(ref) is not installed"])
+        return
+    }
+    speaker.currentVoice = v
+    emit(["event": "voice", "voice": describe(v)])
+}
 
 do {
     for try await line in FileHandle.standardInput.bytes.lines {
@@ -312,6 +412,7 @@ do {
         case "speak" where parts.count == 3 && Int(parts[1]) != nil: speaker.speak(id: Int(parts[1])!, text: parts[2])
         case "stop_speaking": speaker.stop()
         case "rate" where parts.count == 2 && Float(parts[1]) != nil: speaker.setRate(Float(parts[1])!)
+        case "voice" where parts.count >= 2: setVoice(String(line.dropFirst("voice ".count)).trimmingCharacters(in: .whitespaces))
         case "mic" where parts.count == 2 && ["on", "off"].contains(parts[1]): await setMic(parts[1] == "on")
         case "": break
         default: log("unknown command \(line)")

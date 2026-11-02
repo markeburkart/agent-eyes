@@ -9,6 +9,7 @@
     agent-eyes chat                  talk to the agent by typing (one line per turn)
     agent-eyes chat --voice          ... or hands-free: say "hey eyes", then the request; replies are read out
                                      (in the chat, /voice and /speech switch each on and off)
+    agent-eyes chat --voice --speech-voice Ava    ... read out with the Ava voice (pick one on the dashboard to keep it)
 
 Every command builds and spawns the camsvc helper unless --url points at one already running.
 """
@@ -23,6 +24,7 @@ import signal
 import sys
 import threading
 
+from . import settings
 from .camera import CameraError, CameraSource, ContinuityCameraSource, Region
 from .camera.continuity import REPO_ROOT, build_helper
 from .voice import (
@@ -66,6 +68,9 @@ def main() -> None:
     voice.add_argument("--speech", action=argparse.BooleanOptionalAction, default=None,
                        help="read replies out (toggle with /speech or on the page; default: on with --voice)")
     voice.add_argument("--locale", default=None, help="speech locale, e.g. en-US (default: the system's)")
+    voice.add_argument("--speech-voice", default=None, metavar="NAME",
+                       help='voice replies are read out with, a name ("Ava", "Zoe (Premium)") or identifier '
+                            "(default: the one last chosen on the dashboard, else the best installed for the locale)")
     voice.add_argument("--voice-file", default=None, help=argparse.SUPPRESS)  # play an audio file instead of the mic (testing)
 
     ui = sub.add_parser("ui", parents=[helper, budget, voice], help="start the agent and its dashboard in the browser (default)")
@@ -112,6 +117,7 @@ def main() -> None:
                 audio_file=args.voice_file,
                 listening=args.voice,
                 speaking=args.voice if args.speech is None else args.speech,
+                voice=args.speech_voice,
             ),
             port=args.port,
             open_browser=not args.no_browser,
@@ -259,7 +265,8 @@ def start_voice(args: argparse.Namespace, mic: bool) -> VoiceHelper:
         build_voice_helper()
     # A test audio file stands in for the mic; keep the readout silent then.
     return VoiceHelper(locale=args.locale, context=wake_words_of(args), audio_file=args.voice_file,
-                       speech_volume=0.0 if args.voice_file else 1.0, mic=mic)
+                       speech_volume=0.0 if args.voice_file else 1.0, mic=mic,
+                       voice=args.speech_voice or settings.load().get("voice"))
 
 
 class VoiceControls:
@@ -306,7 +313,9 @@ class VoiceControls:
             listening = f'voice commands on (say "{self.wake_words[0]}", then your request)'
         else:
             listening = "voice commands off"
-        return f"{listening}, speech {'on' if self.speaking else 'off'}"
+        helper = self._helper
+        voice = f" with {helper.voice.label(helper.locale)}" if self.speaking and helper and helper.voice else ""
+        return f"{listening}, speech {'on' if self.speaking else 'off'}{voice}"
 
     async def command(self, text: str) -> None:
         """Handles a typed /command."""

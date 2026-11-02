@@ -16,7 +16,7 @@ from .commands import (
     WakeHeard,
     voice_commands,
 )
-from .helper import Transcript, VoiceError, VoiceHelper, build_helper, chime
+from .helper import Transcript, Voice, VoiceError, VoiceHelper, build_helper, chime, list_voices
 
 __all__ = [
     "ACTIONS",
@@ -31,11 +31,13 @@ __all__ = [
     "Interrupted",
     "SlowedDown",
     "Transcript",
+    "Voice",
     "VoiceError",
     "VoiceEvent",
     "VoiceHelper",
     "WakeHeard",
     "build_helper",
     "chime",
+    "list_voices",
     "voice_commands",
 ]

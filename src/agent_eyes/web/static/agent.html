@@ -53,6 +53,9 @@
   #voice #endTalk { flex: none; font-size: 18px; font-weight: 600; padding: 10px 20px; border-radius: 8px; }
   #voice #endTalk[hidden] { display: none; }
   #voice .switches { flex: none; display: flex; flex-direction: column; gap: 2px; }
+  #voice .switches select { font: inherit; font-size: 13px; max-width: 220px; }
+  #voice .switches .vget { max-width: 260px; font-size: 12px; color: var(--muted); }
+  #voice .switches .vget[hidden] { display: none; }
   #voice.off, #voice.starting { padding: 6px 16px; }
   #voice.off .vtext b, #voice.starting .vtext b { font-size: 15px; }
   #voice.off .dot, #voice.starting .dot { width: 12px; height: 12px; }
@@ -199,6 +202,8 @@
   <div class="switches">
     <label class="toggle"><input type="checkbox" id="voiceOn"> voice commands</label>
     <label class="toggle"><input type="checkbox" id="speechOn"> read replies out</label>
+    <label class="toggle" title="Voice replies are read out with; choosing one says a sample and is remembered for the next run">voice <select id="ttsVoice" disabled></select></label>
+    <span class="vget" id="voiceGet" hidden>For a more natural voice, download a Premium or Enhanced one (in English e.g. Ava, Zoe or Evan) in System Settings → Accessibility → Spoken Content → Manage Voices, then reload this page.</span>
   </div>
 </section>
 <main>
@@ -309,6 +314,25 @@ function applyVoice(v) {
   document.title = { live: "● Agent Eyes: conversation live", dictating: "● Agent Eyes: listening",
                      answering: "Agent Eyes: answering" }[v.state] || "Agent Eyes";
   if (!voicePending && v.state !== "starting") { $("#voiceOn").checked = v.listening; $("#speechOn").checked = v.speaking; }
+  applyVoices(v);
+}
+
+// Speaking voice: natural voices best first (as the server lists them), novelty and robotic ones in a group below.
+const ttsVoiceEl = $("#ttsVoice");
+let voicesKey = "";
+function applyVoices(v) {
+  const key = JSON.stringify(v.voices);
+  if (key !== voicesKey) {
+    voicesKey = key;
+    const options = list => list.map(x => Object.assign(el("option", null, x.label), { value: x.identifier }));
+    const other = el("optgroup");
+    other.label = "Novelty and robotic voices";
+    other.append(...options(v.voices.filter(x => !x.natural)));
+    ttsVoiceEl.replaceChildren(...options(v.voices.filter(x => x.natural)), ...(other.children.length ? [other] : []));
+  }
+  if (!voicePending && document.activeElement !== ttsVoiceEl) ttsVoiceEl.value = v.voice ?? "";
+  ttsVoiceEl.disabled = !v.voices.length;
+  $("#voiceGet").hidden = !v.voices.length || v.voices.some(x => x.natural && x.quality !== "compact");
 }
 
 // Counts down between polls.
@@ -331,6 +355,8 @@ async function setVoice(change) {
 }
 $("#voiceOn").onchange = e => setVoice({ listening: e.target.checked });
 $("#speechOn").onchange = e => setVoice({ speaking: e.target.checked });
+ttsVoiceEl.onchange = () => setVoice({ voice: ttsVoiceEl.value }).then(() => ttsVoiceEl.blur());
+post("/api/session/voices/refresh").catch(() => {});  // picks up voices downloaded since the start
 $("#endTalk").onclick = async () => {
   try { applySession(await post("/api/session/voice/end")); }
   catch (e) { addNote(`ending the conversation failed: ${e.message}`, "bad center"); }
