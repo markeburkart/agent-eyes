@@ -4,6 +4,13 @@ Everything the page shows (what was said, typed or spoken, each capture with its
 region, turn timing and cost, status and voice changes) becomes one numbered event. The page polls `events_after(seq)`.
 Events also go to transcript.jsonl and capture images to the session folder, for review after
 a pilot session.
+
+Popovers: `show_popover(kind, title, payload)` opens a movable dialog on the page ("popover"
+event); `dismiss_popovers()` closes them ("popover_close"). Kinds the page doesn't need help with
+pass straight through; a kind can register a step in POPOVER_KINDS that checks the payload and adds
+what the page needs. "annotated-image" renders the agent's marks over a capture into an SVG, saved
+next to the capture. The session keeps the open popovers in z-order (the page reports clicks with
+`raise_popover()`), so "dismiss" closes the one on top.
 """
 
 from __future__ import annotations
@@ -16,7 +23,8 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from ..agent import CaptureBudget, CaptureEvent, EyesAgent, TurnResult
+from ..agent import CaptureBudget, CaptureEvent, CaptureLog, EyesAgent, TurnResult
+from ..agent.annotate import parse_annotations, render_svg
 from ..camera import CameraSource, Capture, Detail, Region
 from .voice import LiveVoice
 
@@ -57,6 +65,10 @@ class LiveSession:
         self._turn: asyncio.Task | None = None
         self._turn_no = 0
         self._captures: dict[str, tuple[str, bytes]] = {}
+        self._capture_log = CaptureLog()  # kept across conversations, so capture numbers stay unique
+        self._popover_files: dict[str, tuple[str, bytes]] = {}
+        self._popovers: list[str] = []  # open popover ids, topmost last
+        self._popover_no = 0
         self._events: list[dict] = []
         self._changed = threading.Condition()
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -66,7 +78,8 @@ class LiveSession:
 
     async def start(self) -> None:
         self._set_state("starting")
-        agent = EyesAgent(self.camera, self.budget, model=self.model, on_capture=self._on_capture)
+        agent = EyesAgent(self.camera, self.budget, model=self.model, on_capture=self._on_capture,
+                          captures=self._capture_log, show_popover=self.show_popover)
         try:
             await agent.__aenter__()
         except Exception as e:
@@ -102,6 +115,7 @@ class LiveSession:
             except Exception:
                 pass
         self.cost_usd = None
+        self.dismiss_popovers("all")
         self.push("status", text="new conversation")
         await self.start()
 
@@ -153,13 +167,14 @@ class LiveSession:
             self.push("capture", turn=self._turn_no, reason=e.reason, view=e.view, detail=e.detail, error=e.error, message=e.message)
             return
         cap = e.capture
-        cid = f"{len(self._captures) + 1:03d}-{e.detail}"
+        cid = self._cid(e.number, e.detail)
         self._captures[cid] = (cap.mime, cap.image)
         (self.out_dir / f"{cid}.jpg").write_bytes(cap.image)
         self.push(
             "capture",
             turn=self._turn_no,
             id=cid,
+            number=e.number,
             image=f"/api/session/captures/{cid}",
             reason=e.reason,
             view=e.view,
@@ -173,10 +188,68 @@ class LiveSession:
             frame_age_ms=cap.extra.get("frame_age_ms"),
         )
 
+    @staticmethod
+    def _cid(number: int | None, detail: str) -> str:
+        return f"{number:03d}-{detail}"
+
+    # ---- popovers (on the loop) ----------------------------------------------
+
+    def show_popover(self, kind: str, title: str, payload: dict) -> str:
+        """Opens a popover on the page and returns its id. Raises ValueError if `payload` doesn't suit `kind`."""
+        if not kind or not isinstance(payload, dict):
+            raise ValueError("a popover needs a kind and a payload object")
+        pid = f"p{self._popover_no + 1}"
+        prepare = POPOVER_KINDS.get(kind)
+        payload = prepare(self, pid, payload) if prepare else payload
+        self._popover_no += 1
+        self._popovers.append(pid)
+        self.push("popover", turn=self._turn_no, id=pid, kind=kind, title=title or kind, payload=payload)
+        return pid
+
+    def dismiss_popovers(self, which: str = "top") -> list[str]:
+        """Closes popover `which` ("top": the one on top, "all", or an id); returns the ids closed."""
+        if which == "all":
+            ids, self._popovers = self._popovers, []
+        elif which == "top":
+            ids = self._popovers[-1:]
+            del self._popovers[-1:]
+        elif which in self._popovers:
+            ids = [which]
+            self._popovers.remove(which)
+        else:
+            ids = []
+        if ids:
+            self.push("popover_close", ids=ids)
+        return ids
+
+    def raise_popover(self, pid: str) -> None:
+        """The page brought `pid` to the front (no event: other pages keep their own stacking)."""
+        if pid in self._popovers:
+            self._popovers.remove(pid)
+            self._popovers.append(pid)
+
+    def _annotated_image(self, pid: str, payload: dict) -> dict:
+        number = payload.get("capture")
+        cap = self._capture_log.get(number) if isinstance(number, int) else None
+        if cap is None:
+            raise ValueError(f"there is no capture {number}")
+        annotations = parse_annotations(payload.get("annotations"))
+        cid = self._cid(number, cap.detail)
+        name = f"{cid}-{pid}.svg"
+        svg = render_svg(cap.image, cap.mime, cap.width, cap.height, annotations).encode()
+        (self.out_dir / name).write_bytes(svg)
+        self._popover_files[name] = ("image/svg+xml", svg)
+        return {"capture": number, "source": cid, "annotations": annotations, "caption": str(payload.get("caption") or ""),
+                "image": f"/api/session/files/{name}", "width": cap.width, "height": cap.height}
+
     # ---- readers -------------------------------------------------------------
 
     def image(self, cid: str) -> tuple[str, bytes] | None:
         return self._captures.get(cid)
+
+    def file(self, name: str) -> tuple[str, bytes] | None:
+        """A rendered popover file (annotated capture), by name."""
+        return self._popover_files.get(name)
 
     def events_after(self, seq: int, wait: float = 0) -> list[dict]:
         """Events with a higher seq; blocks up to `wait` seconds for one to arrive."""
@@ -186,8 +259,7 @@ class LiveSession:
             return [e for e in self._events[-500:] if e["seq"] > seq]
 
     def summary(self) -> dict:
-        return {"state": self.state, "error": self.error, "cost_usd": self.cost_usd, "model": self.model,
-                "out_dir": str(self.out_dir), "budget": self.budget.state(),
+        return {"state": self.state, "error": self.error, "cost_usd": self.cost_usd, "model": self.model,                "out_dir": str(self.out_dir), "budget": self.budget.state(),
                 "voice": self.voice.summary() if self.voice else None}
 
     # ---- internals -----------------------------------------------------------
@@ -211,3 +283,9 @@ class LiveSession:
             self._events.append(event)
             self._changed.notify_all()
         self._log.write(json.dumps(event) + "\n")
+
+
+POPOVER_KINDS = {
+    "annotated-image": LiveSession._annotated_image,
+}
+"""Per-kind step that checks a popover's payload and adds what the page needs to show it (kinds not listed pass through)."""

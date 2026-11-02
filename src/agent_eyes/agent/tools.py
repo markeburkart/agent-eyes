@@ -10,10 +10,16 @@ from typing import Any
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from ..camera import CameraError, CameraSource, Capture, Region
+from .annotate import ANNOTATION_SCHEMA, MAX_ANNOTATIONS
 from .budget import CaptureBudget
 
 SERVER_NAME = "eyes"
 CAPTURE_TOOL = f"mcp__{SERVER_NAME}__capture_frame"
+ANNOTATE_TOOL = f"mcp__{SERVER_NAME}__annotate_capture"
+
+ShowPopover = Callable[[str, str, dict], str]
+"""show_popover(kind, title, payload) -> popover id: opens a popover on the dashboard; raises ValueError
+for a payload it can't show. Kinds so far: "annotated-image" ({"capture": n, "annotations": [...], "caption": str})."""
 
 CAPTURE_SCHEMA = {
     "type": "object",
@@ -40,6 +46,25 @@ CAPTURE_SCHEMA = {
 }
 
 
+class CaptureLog:
+    """Captures taken so far, numbered from 1, so the agent can refer to one later (e.g. to annotate it).
+    Shared across conversations by whoever keeps it, so the numbers stay unique."""
+
+    def __init__(self) -> None:
+        self._captures: list[Capture] = []
+
+    def add(self, cap: Capture) -> int:
+        self._captures.append(cap)
+        return len(self._captures)
+
+    def get(self, number: int) -> Capture | None:
+        return self._captures[number - 1] if 1 <= number <= len(self._captures) else None
+
+    @property
+    def latest(self) -> int | None:
+        return len(self._captures) or None
+
+
 @dataclass(frozen=True)
 class CaptureEvent:
     """One capture_frame call, for whoever displays them (terminal now, dashboard later)."""
@@ -48,12 +73,39 @@ class CaptureEvent:
     view: str
     detail: str
     capture: Capture | None = None
+    number: int | None = None
+    """The capture's number in the CaptureLog."""
     error: str | None = None
     """Error code ("throttled", "no_frames", ...) when nothing was captured."""
     message: str = ""
 
 
-def capture_server(camera: CameraSource, budget: CaptureBudget, on_capture: Callable[[CaptureEvent], None]):
+ANNOTATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "capture": {"type": "integer", "description": "Number of the capture to mark up. Omit for the latest one."},
+        "title": {"type": "string", "description": "A few words, shown as the popover's title."},
+        "caption": {"type": "string", "description": "Optional one-line note shown under the image."},
+        "annotations": {
+            "type": "array",
+            "description": f"Up to {MAX_ANNOTATIONS} marks. Coordinates are normalized 0..1 from the top-left of "
+            "that capture's image as you saw it: for an inspect of a region, relative to the crop, not the full frame.",
+            "items": ANNOTATION_SCHEMA,
+        },
+    },
+    "required": ["title", "annotations"],
+}
+
+
+def capture_server(
+    camera: CameraSource,
+    budget: CaptureBudget,
+    on_capture: Callable[[CaptureEvent], None],
+    captures: CaptureLog,
+    show_popover: ShowPopover | None = None,
+):
+    """The eyes MCP server: capture_frame, plus annotate_capture when there is a dashboard (`show_popover`)."""
+
     @tool(
         "capture_frame",
         "Take one picture of the workbench. Only look when the answer depends on the current physical state, "
@@ -85,14 +137,15 @@ def capture_server(camera: CameraSource, budget: CaptureBudget, on_capture: Call
             return fail(e.code, e.message + hint)
 
         budget.record()
-        on_capture(CaptureEvent(reason, view, detail, capture=cap))
+        number = captures.add(cap)
+        on_capture(CaptureEvent(reason, view, detail, capture=cap, number=number))
         turn_left, minute_left = budget.remaining()
         region_text = (
             f"region x={cap.region.x:.3f} y={cap.region.y:.3f} w={cap.region.w:.3f} h={cap.region.h:.3f}"
             if cap.region else "full frame"
         )
         info = (
-            f"{cap.camera.name}, {detail}, {region_text}, {cap.width}x{cap.height}px "
+            f"Capture {number}: {cap.camera.name}, {detail}, {region_text}, {cap.width}x{cap.height}px "
             f"from a {cap.source_size[0]}x{cap.source_size[1]} frame. "
             f"Captures left: {turn_left} this turn, {minute_left} this minute."
         )
@@ -103,4 +156,31 @@ def capture_server(camera: CameraSource, budget: CaptureBudget, on_capture: Call
             ]
         }
 
-    return create_sdk_mcp_server(SERVER_NAME, tools=[capture_frame])
+    @tool(
+        "annotate_capture",
+        "Show the user one of your captures with boxes, circles, arrows or labels drawn on it, in a popover on "
+        "their screen, to point something out or show where to do something. Costs no capture.",
+        ANNOTATE_SCHEMA,
+    )
+    async def annotate_capture(args: dict[str, Any]) -> dict[str, Any]:
+        number = args.get("capture") or captures.latest
+        if number is None:
+            return _error("No capture to annotate yet: take one with capture_frame first.")
+        assert show_popover is not None  # only registered with one
+        try:
+            pid = show_popover("annotated-image", str(args.get("title", "")).strip(), {
+                "capture": int(number),
+                "annotations": args.get("annotations"),
+                "caption": str(args.get("caption") or "").strip(),
+            })
+        except (TypeError, ValueError) as e:
+            return _error(f"Not shown: {e}")
+        return {"content": [{"type": "text", "text": f"Shown on the user's screen (popover {pid}, capture {number}). "
+                             'They can close it themselves or say "dismiss".'}]}
+
+    tools = [capture_frame] + ([annotate_capture] if show_popover else [])
+    return create_sdk_mcp_server(SERVER_NAME, tools=tools)
+
+
+def _error(text: str) -> dict[str, Any]:
+    return {"content": [{"type": "text", "text": text}], "is_error": True}

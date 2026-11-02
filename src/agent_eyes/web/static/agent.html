@@ -152,6 +152,22 @@
   dialog .mini { position: relative; height: 90px; flex: none; border: 1px solid var(--line); background: var(--bg); }
   dialog .mini i { position: absolute; background: var(--look); border: 1px solid #000; min-width: 3px; min-height: 3px; }
 
+  /* popovers: movable dialogs the agent opens (annotated captures, ...) */
+  .popover { position: fixed; width: min(600px, 90vw); min-width: 240px; min-height: 120px; max-height: 92vh; display: flex; flex-direction: column;
+             background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 10px 34px rgba(0,0,0,.35); resize: both; overflow: hidden; }
+  .popover.top { border-color: var(--accent); }
+  .popover .ptitle { display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 12px; border-bottom: 1px solid var(--line); cursor: move;
+                     user-select: none; touch-action: none; font-weight: 600; font-size: 15px; }
+  .popover .ptitle span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .popover .ptitle button { flex: none; font-size: 18px; line-height: 1; padding: 2px 9px; }
+  .popover .pbody { flex: 1; min-height: 0; overflow: auto; }
+  .popover .pbody > img { display: block; width: 100%; max-height: calc(92vh - 90px); object-fit: contain; background: #000; }
+  .popover .pbody .caption { padding: 8px 12px; font-size: 16px; }
+  .popover .pbody .muted { padding: 0 12px 8px; color: var(--muted); font-size: 12px; }
+  .popover .pbody pre { margin: 0; padding: 10px 12px; font-size: 12px; white-space: pre-wrap; }
+  .note.pop { cursor: pointer; }
+  .note.pop:hover { color: var(--accent); }
+
   @media (max-width: 900px) { main { grid-template-columns: 1fr; } #live { min-height: 50vh; } }
 </style>
 </head>
@@ -390,6 +406,16 @@ function handle(e, live) {
     case "voice":
       if (e.text) addNote(`${fmtTime(e.time)} · ${e.text}`, "center");
       break;
+    case "popover": {
+      openPopover(e);
+      const n = addNote(`showed · ${e.title}`, "pop");
+      n.title = "bring to front";
+      n.onclick = () => popovers.has(e.id) && raisePopover(popovers.get(e.id));
+      break;
+    }
+    case "popover_close":
+      for (const id of e.ids) closePopover(id);
+      break;
   }
 }
 
@@ -453,6 +479,86 @@ function openShot(e) {
 $("img", box).onclick = () => $(".imgwrap", box).classList.toggle("zoom");
 $("#closeBox").onclick = () => box.close();
 box.onclick = e => { if (e.target === box) box.close(); };
+
+// ---- popovers -----------------------------------------------------------------
+// The shell (title bar to drag, ×, click to bring to front, stacking) is the same for every kind;
+// the body comes from POPOVER_RENDERERS[kind](payload, body, event), which may return { width } in px to size the
+// popover for its content. A new kind only needs a renderer here
+// (and, if the server must prepare its payload, an entry in live.py's POPOVER_KINDS).
+
+const POPOVER_RENDERERS = {
+  "annotated-image"(p, body, e) {
+    const img = el("img");
+    img.src = p.image;
+    img.alt = e.title;
+    img.style.aspectRatio = `${p.width} / ${p.height}`;
+    body.append(img);
+    if (p.caption) body.append(el("div", "caption", p.caption));
+    const src = shots.get(p.source);
+    body.append(el("div", "muted", `capture ${p.capture}${src ? ` · ${src.detail} · ${fmtRegion(src.region)}` : ""}`));
+    return { width: Math.max(320, Math.min(600, innerHeight * 0.6 * p.width / p.height)) };  // image about 60vh tall at most
+  },
+};
+
+const popovers = new Map();  // id -> element
+let popZ = 100;
+
+function openPopover(e) {
+  const pop = el("div", "popover"), bar = el("div", "ptitle"), body = el("div", "pbody"), x = el("button", null, "×");
+  x.title = 'Close (or say "dismiss")';
+  bar.append(el("span", null, e.title), x);
+  pop.append(bar, body);
+  const render = POPOVER_RENDERERS[e.kind] || ((p, b) => b.append(el("pre", null, JSON.stringify(p, null, 2))));
+  const size = render(e.payload, body, e);
+  if (size?.width) pop.style.width = `min(${size.width}px, 90vw)`;
+  // Cascade new popovers over the left column.
+  const k = popovers.size % 8;
+  Object.assign(pop.style, { left: `${24 + k * 32}px`, top: `${110 + k * 32}px` });
+  document.body.append(pop);
+  popovers.set(e.id, pop);
+  pop.dataset.id = e.id;
+  stackTop(pop);
+  x.onclick = () => { closePopover(e.id); post("/api/session/popovers/dismiss", { which: e.id }).catch(() => {}); };
+  pop.addEventListener("pointerdown", () => raisePopover(pop));
+  dragBy(bar, pop);
+}
+
+function stackTop(pop) {
+  pop.style.zIndex = ++popZ;
+  for (const p of popovers.values()) p.classList.toggle("top", p === pop);
+}
+
+function raisePopover(pop) {
+  if (pop.classList.contains("top")) return;
+  stackTop(pop);
+  post("/api/session/popovers/raise", { id: pop.dataset.id }).catch(() => {});
+}
+
+function closePopover(id) {
+  popovers.get(id)?.remove();
+  popovers.delete(id);
+  const top = [...popovers.values()].sort((a, b) => b.style.zIndex - a.style.zIndex)[0];
+  for (const p of popovers.values()) p.classList.toggle("top", p === top);
+}
+
+// Drag by the title bar; the bar always stays on screen.
+function dragBy(handle, pop) {
+  handle.addEventListener("pointerdown", ev => {
+    if (ev.button !== 0 || ev.target.closest("button")) return;
+    ev.preventDefault();
+    handle.setPointerCapture(ev.pointerId);
+    const r = pop.getBoundingClientRect(), dx = ev.clientX - r.left, dy = ev.clientY - r.top;
+    const move = m => {
+      const left = Math.min(Math.max(m.clientX - dx, 60 - r.width), innerWidth - 60);
+      const top = Math.min(Math.max(m.clientY - dy, 0), innerHeight - handle.offsetHeight);
+      Object.assign(pop.style, { left: `${left}px`, top: `${top}px` });
+    };
+    const up = () => { handle.removeEventListener("pointermove", move); handle.removeEventListener("pointerup", up); handle.removeEventListener("pointercancel", up); };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+    handle.addEventListener("pointercancel", up);
+  });
+}
 
 // ---- live camera view -------------------------------------------------------
 
