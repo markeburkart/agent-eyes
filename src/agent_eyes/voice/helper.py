@@ -30,6 +30,34 @@ class VoiceError(Exception):
 
 
 @dataclass(frozen=True)
+class Voice:
+    """A speaking voice installed on the Mac, as voicesvc reports it."""
+
+    identifier: str
+    name: str
+    """As the system names it, e.g. "Ava (Premium)"."""
+    language: str
+    quality: str
+    """premium | enhanced | compact"""
+    natural: bool = True
+    """False for novelty voices (Bubbles, Zarvox, ...) and the robotic Eloquence ones (Eddy, Grandma, ...)."""
+
+    @classmethod
+    def of(cls, d: dict) -> Voice:
+        return cls(d["identifier"], d["name"], d["language"], d["quality"], d.get("natural", True))
+
+    @property
+    def short_name(self) -> str:
+        """"Ava" for "Ava (Premium)"."""
+        return self.name.split(" (", 1)[0]
+
+    def label(self, locale: str | None = None) -> str:
+        """"Ava — Premium", with the region when it isn't `locale`'s: "Daniel — Compact · en-GB"."""
+        region = f" · {self.language}" if locale and self.language != locale else ""
+        return f"{self.short_name} — {self.quality.capitalize()}{region}"
+
+
+@dataclass(frozen=True)
 class Transcript:
     text: str
     final: bool
@@ -45,6 +73,27 @@ def build_helper() -> None:
         raise VoiceError("helper_build_failed", "swift not found; install the Xcode command line tools")
     if result.returncode != 0:
         raise VoiceError("helper_build_failed", f"{' '.join(cmd)} failed:\n{result.stdout}{result.stderr}")
+
+
+def helper_path(binary: Path | str | None = None) -> Path:
+    return Path(binary or os.environ.get("AGENT_EYES_VOICESVC", DEFAULT_BINARY))
+
+
+def list_voices(*, binary: Path | str | None = None, locale: str | None = None,
+                voice: str | None = None) -> tuple[str, list[Voice], Voice | None]:
+    """The locale voicesvc would use, its language's installed voices, best first, and the one it would speak
+    with (`voice` if installed, else its default), without starting it. Needs the helper built."""
+    cmd = [str(helper_path(binary)), "--list-voices"]
+    if locale:
+        cmd += ["--locale", locale]
+    if voice:
+        cmd += ["--voice", voice]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        event = json.loads(result.stdout)
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
+        raise VoiceError("voices_unavailable", f"could not list the voices: {e}")
+    return event["locale"], [Voice.of(v) for v in event["voices"]], event["voice"] and Voice.of(event["voice"])
 
 
 def chime(name: str) -> None:
@@ -66,19 +115,27 @@ class VoiceHelper:
         audio_file: str | None = None,
         speech_volume: float = 1.0,
         mic: bool = True,
+        voice: str | None = None,
         startup_timeout: float = 120.0,
     ):
         """`context` biases recognition (pass the wake words); `audio_file` replaces the mic, for testing.
-        `mic=False` starts with the microphone closed (speaking only). The startup timeout covers a
+        `mic=False` starts with the microphone closed (speaking only). `voice` (an identifier or name)
+        speaks instead of the best installed voice for the locale. The startup timeout covers a
         one-time speech model download."""
         self.echo = Echo()
         self.mic_on = False
         self.rate = DEFAULT_RATE
+        self.locale: str | None = None
+        """The locale voicesvc settled on (e.g. en-US), once started."""
+        self.voices: list[Voice] = []
+        """Installed voices for the locale's language, best first, once started."""
+        self.voice: Voice | None = None
+        """The voice replies are read out with, once started."""
         self._utterances: dict[int, int] = {}  # id -> words of it already added to echo
         self._texts: dict[int, str] = {}  # id -> its text, until it's spoken
         self._reached: dict[int, int] = {}  # id -> characters of its text read out so far (up to the current word)
         self._next_id = 0
-        self._binary = Path(binary or os.environ.get("AGENT_EYES_VOICESVC", DEFAULT_BINARY))
+        self._binary = helper_path(binary)
         self._args: list[str] = []
         if locale:
             self._args += ["--locale", locale]
@@ -89,6 +146,8 @@ class VoiceHelper:
         self._args += ["--speech-volume", str(speech_volume)]
         if not mic:
             self._args.append("--mic-off")
+        if voice:
+            self._args += ["--voice", voice]
         self._startup_timeout = startup_timeout
         self._proc: asyncio.subprocess.Process | None = None
 
@@ -108,6 +167,9 @@ class VoiceHelper:
                 while (event := await self._read_event())["event"] != "ready":
                     if event["event"] == "status":
                         print(f"voice: {event['message']}", file=sys.stderr, flush=True)
+                self.locale = event["locale"]
+                self.voices = [Voice.of(v) for v in event.get("voices", [])]
+                self.voice = event.get("voice") and Voice.of(event["voice"])
         except TimeoutError:
             await self.close()
             raise VoiceError("helper_timeout", "voicesvc did not become ready (is a microphone permission prompt waiting?)")
@@ -172,6 +234,12 @@ class VoiceHelper:
         for text in rest:
             await self.speak(text)
 
+    async def set_voice(self, identifier: str) -> None:
+        """Reads out with voice `identifier` from the next utterance on. `voice` follows (at once if it is
+        one of `voices`); voicesvc reports a voice that isn't installed on stderr and keeps the current one."""
+        await self._send(f"voice {identifier}")
+        self.voice = next((v for v in self.voices if v.identifier == identifier), self.voice)
+
     async def set_mic(self, on: bool) -> None:
         """Opens or closes the microphone. `mic_on` follows once the helper confirms."""
         await self._send(f"mic {'on' if on else 'off'}")
@@ -196,6 +264,11 @@ class VoiceHelper:
                 self._texts.pop(event["id"], None)
                 self._reached.pop(event["id"], None)
                 self.echo.done()
+            elif event["event"] == "voice":
+                if "error" in event:
+                    print(f"voice: {event['error']}", file=sys.stderr, flush=True)
+                else:
+                    self.voice = Voice.of(event["voice"])
             elif event["event"] == "mic":
                 self.mic_on = event["on"]
                 if "error" in event:

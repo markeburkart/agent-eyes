@@ -11,6 +11,10 @@ like their × buttons, and "next" / "back" / "repeat" move through the steps pop
 steps to move through, they go to the agent like any request). Each
 change is also a session event, so the page's long poll picks it up at once. The same sounds as
 in the terminal chat play.
+
+The voice replies are read out with is chosen on the page from the installed ones (`voices`, listed
+without starting voicesvc); `choose_voice()` switches to it, says a short sample and remembers it
+for the next run (settings.py), unless --speech-voice picks one for this run.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from .. import settings
 from ..voice import (
     ACTIONS,
     DEFAULT_WAKE_WORDS,
@@ -34,11 +39,13 @@ from ..voice import (
     FollowUpHeard,
     Interrupted,
     SlowedDown,
+    Voice,
     VoiceError,
     VoiceHelper,
     WakeHeard,
     build_helper,
     chime,
+    list_voices,
     voice_commands,
 )
 
@@ -58,6 +65,8 @@ class VoiceOptions:
     """Voice commands on at startup."""
     speaking: bool = False
     """Replies read out at startup."""
+    voice: str | None = None
+    """Speaking voice (identifier or name) for this run, instead of the one last chosen on the page."""
 
 
 class LiveVoice:
@@ -73,6 +82,13 @@ class LiveVoice:
         self.dictating = False
         self.starting = False
         self.error: str | None = None
+        self.locale: str | None = None
+        self.voices: list[Voice] = []
+        """Installed voices for the locale's language, best first (once listed)."""
+        self.voice: Voice | None = None
+        """The voice replies are read out with."""
+        self._voice_ref = options.voice or settings.load().get("voice")
+        self._build: asyncio.Task | None = None
         self._helper: VoiceHelper | None = None
         self._stack = contextlib.AsyncExitStack()
         self._listen_task: asyncio.Task | None = None
@@ -119,13 +135,70 @@ class LiveVoice:
             self.session.push("voice", **({"text": self.status()} if changed else {}))
 
     async def _start(self, mic: bool) -> VoiceHelper:
-        if "AGENT_EYES_VOICESVC" not in os.environ:
-            await asyncio.to_thread(build_helper)
+        await self._built()
         o = self.options
-        return await self._stack.enter_async_context(VoiceHelper(
+        helper = await self._stack.enter_async_context(VoiceHelper(
             locale=o.locale, context=o.wake_words, audio_file=o.audio_file,
-            speech_volume=0.0 if o.audio_file else 1.0, mic=mic,
+            speech_volume=0.0 if o.audio_file else 1.0, mic=mic, voice=self._voice_ref,
         ))
+        self.locale, self.voices, self.voice = helper.locale, helper.voices, helper.voice
+        return helper
+
+    async def _built(self) -> None:
+        """Builds voicesvc once (listing the voices and starting it may both want it at startup)."""
+        if "AGENT_EYES_VOICESVC" in os.environ:
+            return
+        if self._build is None or (self._build.done() and self._build.exception()):
+            self._build = asyncio.create_task(asyncio.to_thread(build_helper))
+        await self._build
+
+    # ---- speaking voice ----------------------------------------------------------
+
+    async def load_voices(self) -> None:
+        """Lists the installed voices for the page (again, e.g. after downloading one), without starting voicesvc."""
+        try:
+            await self._built()
+            locale, voices, voice = await asyncio.to_thread(
+                list_voices, locale=self.options.locale, voice=self.voice.identifier if self.voice else self._voice_ref)
+        except VoiceError as e:
+            self.session.push("status", text=f"voice error [{e.code}]: {e.message}", error=True)
+            return
+        self.locale, self.voices = locale, voices
+        if self._helper is None or self.voice is None:
+            self.voice = voice
+        self.session.push("voice")
+
+    def choose_voice(self, identifier: str) -> None:
+        """Reads out with voice `identifier` from now on (and in later runs), and says a short sample in it
+        (in the background: voicesvc may have to start first). Raises ValueError if it isn't one of `voices`."""
+        voice = next((v for v in self.voices if v.identifier == identifier), None)
+        if voice is None:
+            raise ValueError(f"voice {identifier} is not installed")
+        settings.save(voice=identifier)
+        self._voice_ref, self.voice = identifier, voice
+        self.session.push("voice", text=f"voice: {voice.label(self.locale)}")
+        self._readout_task = asyncio.create_task(self._sample(voice))
+
+    async def _sample(self, voice: Voice) -> None:
+        async with self._lock:
+            if self._helper is None:
+                # Voice is off: start voicesvc just to speak (both switches stay as they are).
+                try:
+                    self.starting = True
+                    self.session.push("voice")
+                    self._helper = await self._start(mic=False)
+                    self._listen_task = asyncio.create_task(self._listen(self._helper))
+                except VoiceError as e:
+                    self.error = f"voice error [{e.code}]: {e.message}"
+                    self.session.push("status", text=self.error, error=True)
+                    return
+                finally:
+                    self.starting = False
+                    self.session.push("voice")
+            helper = self._helper
+        await helper.set_voice(voice.identifier)
+        await helper.stop_speaking()
+        await helper.speak(f"This is {voice.short_name}.")
 
     def status(self) -> str:
         if self.listening:
@@ -156,6 +229,9 @@ class LiveVoice:
             "follow_up_s": self.focus.seconds,
             "wake_word": self.options.wake_words[0],
             "error": self.error,
+            "voice": self.voice and self.voice.identifier,
+            "voices": [{"identifier": v.identifier, "label": v.label(self.locale), "quality": v.quality,
+                        "natural": v.natural} for v in self.voices],
         }
 
     # ---- hooks for the session's turns -----------------------------------------

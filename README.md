@@ -28,7 +28,8 @@ The dashboard shows:
   listening, agent answering, or conversation live with the seconds left before it closes (the
   tab title shows "● Agent Eyes: conversation live" too). "End conversation" closes it (or drops a
   request being dictated), like saying "ok thanks". Its switches turn voice commands and
-  reading replies out on and off; spoken requests show in the conversation with a 🎙
+  reading replies out on and off; spoken requests show in the conversation with a 🎙. Its voice
+  dropdown picks the voice replies are read out with (see [Voices](#voices))
 - popovers: when something is easier to show than to say, the agent marks up one of its captures
   (boxes, circles, arrows and short labels) and it opens in a popover over the dashboard. Drag a
   popover by its title bar; clicking one brings it to the front; × closes it. Several can be open
@@ -50,7 +51,7 @@ The dashboard shows:
   camera helper and exits, like Ctrl-C)
 
 `uv run agent-eyes --voice` starts with voice on (same options as `chat --voice` below, e.g.
-`--wake-word`, `--follow-up`, `--no-speech`).
+`--wake-word`, `--follow-up`, `--no-speech`, `--speech-voice`).
 
 Each run writes `transcript.jsonl` and the capture images to `captures/sessions/<start time>/`.
 "New conversation" starts the agent over. The camera diagnostics page (`/cameras`) is still
@@ -107,11 +108,28 @@ Both can be switched during a chat by typing `/voice` (voice commands; off close
 `/speech` (reading replies out; off also stops a readout in progress), or `/voice on|off`,
 `/speech on|off`.
 
+### Voices
+
+Replies are read out with the best voice installed for the speech locale: Premium, then
+Enhanced, then compact (the novelty voices and the robotic Eloquence ones, Eddy, Grandma etc.,
+only when chosen). The compact voices macOS comes with sound mechanical; for a natural one, open
+System Settings → Accessibility → Spoken Content → Manage Voices and download e.g. Ava (Premium),
+Zoe (Premium) or Evan (Enhanced) (Siri voices can't be used: they aren't offered to apps).
+
+Pick one in the dashboard's voice dropdown (next to the voice switches, best voices first,
+labelled with their quality, e.g. "Ava — Premium"): it applies to the next thing read out, says a
+short sample ("This is Ava.") and is remembered for the next run, in
+`~/.config/agent-eyes/settings.json` (the chat uses it too). Without any Premium or Enhanced voice
+installed, the dashboard points to where to get one; reload the page after downloading.
+`--speech-voice NAME` picks one for a single run, by name (`Ava`, `"Zoe (Premium)"`) or identifier
+(`com.apple.voice.premium.en-US.Ava`). (`--voice` already switches voice commands on.)
+
 ```sh
 uv run agent-eyes chat --voice                         # "hey eyes, is the red wire on pin five?"
 uv run agent-eyes chat --voice --wake-word "ok bench"  # your own wake phrase(s), comma-separated
 uv run agent-eyes chat --voice --pause 2.5             # longer pause before a request is sent
 uv run agent-eyes chat --voice --follow-up 60          # keep conversations open longer (0 = wake word every time)
+uv run agent-eyes chat --voice --speech-voice Zoe      # read out with Zoe this time
 ```
 
 ## Layout
@@ -122,7 +140,8 @@ src/agent_eyes/
   agent/           Claude Agent SDK session (session.py), capture_frame, annotate_capture and show_steps tools
                    (tools.py), annotations rendered to SVG (annotate.py), steps (steps.py), capture budget (budget.py)
   camera/          camera abstraction (base.py) and the camsvc-backed source (continuity.py)
-  voice/           voicesvc (helper.py), wake word + dictation and spoken actions (commands.py), readout echo filter (echo.py)
+  settings.py      choices that last across runs (the speaking voice), ~/.config/agent-eyes/settings.json
+  voice/           voicesvc (helper.py, also lists the installed voices), wake word + dictation and spoken actions (commands.py), readout echo filter (echo.py)
   web/             local web server (server.py), the agent session behind the dashboard (live.py), pages (static/)
 camera-service/    camsvc: Swift helper that owns the cameras (built automatically on launch)
 voice-service/     voicesvc: Swift helper for on-device transcription and speech (built when voice is first used)

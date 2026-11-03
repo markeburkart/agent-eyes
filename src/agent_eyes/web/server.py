@@ -6,6 +6,11 @@
 
 POST /api/shutdown stops everything, like Ctrl-C.
 
+Voice: POST /api/session/voice {listening, speaking, voice} switches voice commands and reading
+replies out, and picks the speaking voice (an identifier from the summary's voice.voices; it says
+a sample and is remembered for the next run). POST /api/session/voices/refresh lists the installed
+voices again (after downloading one).
+
 Popovers on the dashboard: POST /api/session/popovers {kind, title, payload} opens one (what the
 agent's annotate_capture does), /api/session/popovers/dismiss {which: "top" | "all" | id} closes
 them (the page's ×, the voice command "dismiss"), /api/session/popovers/raise {id} records that the
@@ -62,6 +67,7 @@ class Backend:
         # The agent (and voicesvc) take a few seconds to start; serve the page meanwhile.
         self.spawn(self.session.start())
         self.spawn(self.session.voice.set(listening=voice.listening, speaking=voice.speaking))
+        self.spawn(self.session.voice.load_voices())
 
     def run(self, coro):
         return asyncio.run_coroutine_threadsafe(coro, self.loop).result()
@@ -184,8 +190,16 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, self.backend.session_summary())
         elif self.path == "/api/session/voice":
             # voicesvc can take a while to start (or a mic permission prompt can be waiting): don't wait for it.
-            change = {k: bool(body[k]) for k in ("listening", "speaking") if k in body}
-            self.backend.spawn(self.backend.session.voice.set(**change))
+            if "voice" in body:
+                try:
+                    self.backend.call(self.backend.session.voice.choose_voice, str(body["voice"]))
+                except ValueError as e:
+                    return self._json(400, {"error": "bad_request", "message": str(e)})
+            if change := {k: bool(body[k]) for k in ("listening", "speaking") if k in body}:
+                self.backend.spawn(self.backend.session.voice.set(**change))
+            self._json(200, self.backend.session_summary())
+        elif self.path == "/api/session/voices/refresh":
+            self.backend.spawn(self.backend.session.voice.load_voices())
             self._json(200, self.backend.session_summary())
         elif self.path == "/api/session/voice/end":
             self.backend.call(self.backend.session.voice.end_conversation)
